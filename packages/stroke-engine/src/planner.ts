@@ -53,6 +53,7 @@ export function buildPlan(
     const { strokes: raw, jitterPx, jitterStep } = opStrokes(op);
     const amount = opts.jitterAmount ?? jitterPx;
     for (const s of raw) {
+      if (s.length < 2) continue; // degenerate strokes never enter the plan
       const jittered = jitterStroke(s, rng, amount, jitterStep);
       const durationMs = Math.min(
         MAX_STROKE_MS,

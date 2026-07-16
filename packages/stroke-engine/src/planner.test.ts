@@ -35,6 +35,18 @@ describe("buildPlan", () => {
     );
     expect(plan.strokes.length).toBeGreaterThan(6);
   });
+  it("filters degenerate strokes (<2 points) out of the plan", () => {
+    const plan = buildPlan(
+      [{
+        type: "draw_diagram",
+        diagram: { kind: "curve", fn: () => NaN, domain: [0, 1], width: 100, height: 100, yRange: [0, 1] },
+        at: { x: 0, y: 0 },
+      }],
+      { seed: 42 }
+    );
+    expect(plan.strokes).toHaveLength(0);
+    expect(plan.totalMs).toBe(0);
+  });
   it("throws MathParseError for bad TeX (caller handles per spec §6)", () => {
     expect(() =>
       buildPlan([{ type: "write_math", tex: "\\bogus", at: { x: 0, y: 0 }, size: 40 }])
