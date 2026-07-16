@@ -1,0 +1,8 @@
+{
+  "name": "teacher",
+  "private": true,
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "test": "npm test -w @teacher/stroke-engine"
+  }
+}
