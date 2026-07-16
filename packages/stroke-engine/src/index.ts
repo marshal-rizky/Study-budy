@@ -7,3 +7,4 @@ export { parseMath, MathParseError } from "./math/parser";
 export type { MathNode } from "./math/parser";
 export { layoutMath, layoutText } from "./math/layout";
 export type { MathLayout, GlyphPlacement, LineSeg } from "./math/layout";
+export { realizeLayout } from "./realize";
