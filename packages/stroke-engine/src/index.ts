@@ -3,3 +3,5 @@ export * from "./types";
 export * from "./rng";
 export { getGlyph, registerGlyph, FALLBACK_GLYPH } from "./glyphs/library";
 export { jitterStroke, resample } from "./jitter";
+export { parseMath, MathParseError } from "./math/parser";
+export type { MathNode } from "./math/parser";
