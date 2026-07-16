@@ -738,6 +738,8 @@ git commit -m "feat: seeded hand-tremor jitter with resampling"
 
 ### Task 6: TeX-subset parser
 
+> **Implementation note (2026-07-16):** the reference code below has two known defects, fixed in the actual implementation (commit 2c3d0f9): (1) `parseAtom` must throw `MathParseError` at end of input (else truncated input like `x^` emits `char: undefined`); (2) the `SYMBOL_COMMANDS` lookup must be guarded with `Object.hasOwn` (else `\constructor` resolves via the prototype chain). Do not regenerate the parser from this snippet without those fixes.
+
 **Files:**
 - Create: `packages/stroke-engine/src/math/parser.ts`
 - Modify: `packages/stroke-engine/src/index.ts`
