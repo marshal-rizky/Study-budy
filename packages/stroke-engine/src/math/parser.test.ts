@@ -49,4 +49,13 @@ describe("parseMath", () => {
   it("throws on unbalanced braces", () => {
     expect(() => parseMath("\\frac{1}{2")).toThrow(MathParseError);
   });
+  it("throws on dangling ^/_ or missing arg at end of input", () => {
+    expect(() => parseMath("x^")).toThrow(MathParseError);
+    expect(() => parseMath("\\frac{1}")).toThrow(MathParseError);
+    expect(() => parseMath("\\sqrt")).toThrow(MathParseError);
+  });
+  it("rejects prototype-chain names as commands", () => {
+    expect(() => parseMath("\\constructor")).toThrow(MathParseError);
+    expect(() => parseMath("\\toString")).toThrow(MathParseError);
+  });
 });

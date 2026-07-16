@@ -68,6 +68,7 @@ class Parser {
   }
 
   private parseAtom(): MathNode {
+    if (this.pos >= this.src.length) throw new MathParseError("unexpected end of input", this.pos);
     const ch = this.src[this.pos];
     if (ch === "{") return this.parseGroup();
     if (ch === "}") throw new MathParseError("unexpected '}'", this.pos);
@@ -95,7 +96,7 @@ class Parser {
     if (name === "sqrt") {
       return { type: "sqrt", body: this.parseArg() };
     }
-    const sym = SYMBOL_COMMANDS[name];
+    const sym = Object.hasOwn(SYMBOL_COMMANDS, name) ? SYMBOL_COMMANDS[name] : undefined;
     if (sym) return { type: "sym", char: sym };
     throw new MathParseError(`unknown command \\${name}`, start);
   }
