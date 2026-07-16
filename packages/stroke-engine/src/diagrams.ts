@@ -41,7 +41,9 @@ export function diagramStrokes(d: Diagram, origin: Point): Stroke[] {
       const pts: Stroke = [];
       for (let i = 0; i <= n; i++) {
         const mx = x0 + ((x1 - x0) * i) / n;
-        const my = Math.min(y1, Math.max(y0, d.fn(mx)));
+        const raw = d.fn(mx);
+        if (!Number.isFinite(raw)) continue; // skip undefined regions (e.g. sqrt of negative)
+        const my = Math.min(y1, Math.max(y0, raw));
         pts.push({
           x: origin.x + ((mx - x0) / (x1 - x0)) * d.width,
           y: origin.y - ((my - y0) / (y1 - y0)) * d.height,

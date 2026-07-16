@@ -26,6 +26,18 @@ describe("diagramStrokes", () => {
     const mid = s[0][Math.floor(s[0].length / 2)];
     expect(mid.y).toBeGreaterThan(200);
   });
+  it("curve: skips non-finite samples (sqrt on partially negative domain)", () => {
+    const s = diagramStrokes(
+      { kind: "curve", fn: Math.sqrt, domain: [-2, 2], width: 300, height: 200, yRange: [0, 2] },
+      { x: 50, y: 250 }
+    );
+    expect(s).toHaveLength(1);
+    expect(s[0].length).toBeGreaterThan(10);
+    for (const p of s[0]) {
+      expect(Number.isFinite(p.x)).toBe(true);
+      expect(Number.isFinite(p.y)).toBe(true);
+    }
+  });
   it("arrow: shaft + head = 2 strokes", () => {
     const s = diagramStrokes({ kind: "arrow", from: { x: 0, y: 0 }, to: { x: 100, y: 0 } }, { x: 0, y: 0 });
     expect(s).toHaveLength(2);
