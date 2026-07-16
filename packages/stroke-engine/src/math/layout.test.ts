@@ -50,6 +50,16 @@ describe("layoutMath", () => {
     expect(bar.x2 - bar.x1).toBeGreaterThan(0.5); // covers two glyphs
     expect(bar.y1).toBeLessThan(-0.6); // above the body
   });
+  it("sqrt with tall body: radical encloses body, bar meets arm, ascent covers ink", () => {
+    const l = layoutMath(parseMath("\\sqrt{\\frac{a}{b}}"));
+    const radical = l.placements.find((p) => p.char === "√")!;
+    const sqrtBar = l.lines[l.lines.length - 1]; // sqrt bar appended after body lines
+    const glyphTop = radical.y - 0.78 * radical.scale;
+    const glyphBottom = radical.y - 0.05 * radical.scale;
+    expect(glyphTop).toBeCloseTo(sqrtBar.y1, 5); // arm meets vinculum
+    expect(glyphBottom).toBeGreaterThan(0); // hook reaches below baseline to cover denominator
+    expect(l.ascent).toBeGreaterThanOrEqual(-glyphTop); // ascent covers all ink
+  });
   it("unknown glyph char still occupies space", () => {
     const l = layoutMath(parseMath("☃"));
     expect(l.width).toBeGreaterThan(0);

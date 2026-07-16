@@ -113,19 +113,32 @@ function layoutNode(node: MathNode, scale: number): MathLayout {
       };
     }
     case "sqrt": {
+      // √ glyph ink (see glyphs/overrides.ts): y ∈ [RADICAL_TOP, RADICAL_BOTTOM], arm tip at x = RADICAL_TIP_X
+      const RADICAL_TOP = -0.78;
+      const RADICAL_BOTTOM = -0.05;
+      const RADICAL_TIP_X = 0.85;
+      const RADICAL_HEIGHT = RADICAL_BOTTOM - RADICAL_TOP; // 0.73
       const body = layoutNode(node.body, scale);
-      const radicalScale = Math.max(scale, (body.ascent + body.descent) / (ROW_ASCENT + ROW_DESCENT));
+      const gap = 0.08 * scale; // vinculum clearance above body ink
+      // scale the radical so its ink spans the body plus the bar clearance
+      const radicalScale = Math.max(
+        scale,
+        (body.ascent + body.descent + gap) / RADICAL_HEIGHT
+      );
+      // anchor the glyph so its bottom hook sits at the body's descent
+      const dy = body.descent - RADICAL_BOTTOM * radicalScale;
+      const glyphTop = dy + RADICAL_TOP * radicalScale; // == -(body.ascent + gap)
       const radicalAdvance = advanceOf("√") * radicalScale;
       const bodyL = translate(body, radicalAdvance, 0);
-      const barY = -(body.ascent + 0.08 * scale);
+      const barY = glyphTop; // vinculum meets the arm exactly
       return {
         placements: [
-          { char: "√", x: 0, y: 0, scale: radicalScale },
+          { char: "√", x: 0, y: dy, scale: radicalScale },
           ...bodyL.placements,
         ],
         lines: [
           ...bodyL.lines,
-          { x1: radicalAdvance - 0.08 * scale, y1: barY, x2: radicalAdvance + body.width, y2: barY },
+          { x1: RADICAL_TIP_X * radicalScale, y1: barY, x2: radicalAdvance + body.width, y2: barY },
         ],
         width: radicalAdvance + body.width + 0.05 * scale,
         ascent: -barY + 0.05 * scale,
