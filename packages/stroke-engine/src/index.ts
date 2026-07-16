@@ -10,3 +10,5 @@ export type { MathLayout, GlyphPlacement, LineSeg } from "./math/layout";
 export { realizeLayout } from "./realize";
 export { diagramStrokes } from "./diagrams";
 export type { Diagram } from "./diagrams";
+export { buildPlan, STROKE_GAP_MS } from "./planner";
+export type { Op, PenStroke, RenderPlan } from "./planner";
