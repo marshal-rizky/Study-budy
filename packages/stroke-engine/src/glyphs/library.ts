@@ -10,7 +10,7 @@ function toGlyph(j: JsonGlyph): GlyphDef {
 }
 
 const lib = new Map<string, GlyphDef>();
-for (const [ch, j] of Object.entries(hersheyJson as Record<string, JsonGlyph>)) {
+for (const [ch, j] of Object.entries(hersheyJson as unknown as Record<string, JsonGlyph>)) {
   lib.set(ch, toGlyph(j));
 }
 
