@@ -12,3 +12,5 @@ export { diagramStrokes } from "./diagrams";
 export type { Diagram } from "./diagrams";
 export { buildPlan, STROKE_GAP_MS } from "./planner";
 export type { Op, PenStroke, RenderPlan } from "./planner";
+export { renderFrame, Player } from "./render";
+export type { StrokeCtx } from "./render";
