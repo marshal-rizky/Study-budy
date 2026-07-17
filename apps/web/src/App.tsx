@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { buildPlan, Player, MathParseError } from "@teacher/stroke-engine";
-import type { Op, RenderPlan } from "@teacher/stroke-engine";
+import type { Op } from "@teacher/stroke-engine";
 
 const CHALK = "#f5f0dc";
 const BOARD = "#1e3a2f";
@@ -45,7 +45,6 @@ const PRESETS: { label: string; ops: Op[] }[] = [
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const playerRef = useRef<Player | null>(null);
-  const lastPlanRef = useRef<RenderPlan | null>(null);
   const [tex, setTex] = useState("\\frac{x+1}{x-2}");
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
@@ -67,11 +66,10 @@ export function App() {
 
   function play(ops: Op[]) {
     setError(null);
-    setPaused(false);
     try {
       const plan = buildPlan(ops, { seed: Math.floor(Math.random() * 1e9) });
-      lastPlanRef.current = plan;
       playerRef.current?.play(plan);
+      setPaused(false);
     } catch (e) {
       setError(e instanceof MathParseError ? e.message : String(e));
     }
@@ -106,7 +104,7 @@ export function App() {
         >
           {paused ? "Resume" : "Pause"}
         </button>
-        <button onClick={() => playerRef.current?.replay()}>Replay</button>
+        <button onClick={() => { playerRef.current?.replay(); setPaused(false); }}>Replay</button>
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
         {PRESETS.map((p) => (
