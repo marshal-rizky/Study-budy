@@ -3,6 +3,6 @@
   "private": true,
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
-    "test": "npm test -w @teacher/stroke-engine"
+    "test": "npm test --workspaces --if-present"
   }
 }
