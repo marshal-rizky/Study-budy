@@ -55,15 +55,17 @@ for (let i = 0; i < chars.length; i++) {
   if (!entry || !entry.d) continue;
   const raw = parseStrokes(entry.d);
   if (raw.length === 0) continue;
-  const xs = raw.flat().map((p) => p[0]);
-  const left = Math.min(...xs);
+  // Hershey x coords are already advance-relative: ink sits inside [0, 2*o],
+  // so `o` is the half-advance and minX/maxX are the side bearings. Keep x as
+  // authored -- shifting ink to 0 would strip the left bearing and butt
+  // neighbouring letters together.
   const strokes = raw.map((s) =>
     s.map(([x, y]) => [
-      Math.round((x - left) * scale * 1e4) / 1e4,
+      Math.round(x * scale * 1e4) / 1e4,
       Math.round((y - baseline) * scale * 1e4) / 1e4,
     ])
   );
-  const advance = Math.round((parseFloat(entry.o) * scale + 0.1) * 1e4) / 1e4;
+  const advance = Math.round(2 * parseFloat(entry.o) * scale * 1e4) / 1e4;
   out[ch] = { advance, strokes };
 }
 // space is not in Hershey data

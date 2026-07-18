@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { buildPlan, Player, MathParseError } from "@teacher/stroke-engine";
+import { buildPlan, Player, MathParseError, LayoutOverflowError } from "@teacher/stroke-engine";
 import type { Op } from "@teacher/stroke-engine";
 
 const CHALK = "#f5f0dc";
@@ -67,11 +67,16 @@ export function App() {
   function play(ops: Op[]) {
     setError(null);
     try {
-      const plan = buildPlan(ops, { seed: Math.floor(Math.random() * 1e9) });
+      const plan = buildPlan(ops, {
+        seed: Math.floor(Math.random() * 1e9),
+        board: { width: W, height: H },
+      });
       playerRef.current?.play(plan);
       setPaused(false);
     } catch (e) {
-      setError(e instanceof MathParseError ? e.message : String(e));
+      if (e instanceof MathParseError) setError(`Parse error: ${e.message}`);
+      else if (e instanceof LayoutOverflowError) setError(`Does not fit: ${e.message}`);
+      else setError(String(e));
     }
   }
 
@@ -111,7 +116,7 @@ export function App() {
           <button key={p.label} onClick={() => play(p.ops)}>{p.label}</button>
         ))}
       </div>
-      {error && <p style={{ color: "#ff8080" }}>Parse error: {error}</p>}
+      {error && <p style={{ color: "#ff8080" }}>{error}</p>}
     </div>
   );
 }

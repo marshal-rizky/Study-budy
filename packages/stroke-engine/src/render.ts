@@ -1,5 +1,5 @@
 import type { RenderPlan, PenStroke } from "./planner";
-import { STROKE_GAP_MS } from "./planner";
+import { STROKE_GAP_MS, PAGE_BREAK_MS } from "./planner";
 import { strokeLength } from "./types";
 
 export interface StrokeCtx {
@@ -41,22 +41,51 @@ function drawPartial(s: PenStroke, fraction: number, ctx: StrokeCtx): void {
   if (drew) ctx.stroke();
 }
 
-/** Draw the state of the plan at `elapsedMs`. Returns true when complete. */
-export function renderFrame(plan: RenderPlan, elapsedMs: number, ctx: StrokeCtx): boolean {
-  let t = elapsedMs;
-  for (let i = 0; i < plan.strokes.length; i++) {
-    const s = plan.strokes[i];
-    if (t >= s.durationMs) {
+/** Draw one page's strokes at local time `t`. Returns true once all are drawn. */
+function drawPage(page: PenStroke[], t: number, ctx: StrokeCtx): boolean {
+  let rem = t;
+  for (let i = 0; i < page.length; i++) {
+    const s = page[i];
+    if (rem >= s.durationMs) {
       drawFull(s, ctx);
-      t -= s.durationMs;
-      if (i < plan.strokes.length - 1) {
-        if (t < STROKE_GAP_MS) return false; // in the gap; later strokes not started
-        t -= STROKE_GAP_MS;
+      rem -= s.durationMs;
+      if (i < page.length - 1) {
+        if (rem < STROKE_GAP_MS) return false; // in the gap; later strokes not started
+        rem -= STROKE_GAP_MS;
       }
     } else {
-      drawPartial(s, t / s.durationMs, ctx);
+      drawPartial(s, rem / s.durationMs, ctx);
       return false;
     }
+  }
+  return true;
+}
+
+/**
+ * Draw the state of the plan at `elapsedMs`. Returns true when complete.
+ * Only the page current at `elapsedMs` is drawn: finished pages are held for
+ * PAGE_BREAK_MS and then wiped, so the caller's clear leaves a blank board.
+ */
+export function renderFrame(plan: RenderPlan, elapsedMs: number, ctx: StrokeCtx): boolean {
+  const n = plan.strokes.length;
+  if (n === 0) return true;
+  let t = elapsedMs;
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j < n && plan.strokes[j].page === plan.strokes[i].page) j++;
+    const page = plan.strokes.slice(i, j);
+    if (j >= n) return drawPage(page, t, ctx); // last page
+    const pageMs =
+      page.reduce((acc, s) => acc + s.durationMs, 0) + (page.length - 1) * STROKE_GAP_MS;
+    if (t < pageMs) return drawPage(page, t, ctx);
+    t -= pageMs;
+    if (t < PAGE_BREAK_MS) {
+      drawPage(page, pageMs, ctx); // hold the finished page during the turn
+      return false;
+    }
+    t -= PAGE_BREAK_MS;
+    i = j;
   }
   return true;
 }
