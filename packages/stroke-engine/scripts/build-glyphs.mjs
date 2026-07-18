@@ -17,19 +17,24 @@ if (!font) {
 // path `d` containing only M/L commands, and `o` = horizontal advance.
 const chars = font.chars;
 
+// Hershey paths use absolute M/L only, but rely on SVG implicit repetition:
+// "M4,6 L4,5 5,3 6,2 8,1" is one moveto plus FOUR linetos. Every coordinate
+// pair after a command letter must be consumed, or curves collapse to their
+// first segment.
 function parseStrokes(d) {
   const strokes = [];
   let current = null;
-  const re = /([ML])\s*(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)/g;
-  let m;
-  while ((m = re.exec(d)) !== null) {
-    const [, cmd, xs, ys] = m;
-    const pt = [parseFloat(xs), parseFloat(ys)];
-    if (cmd === "M") {
-      current = [pt];
-      strokes.push(current);
-    } else if (current) {
-      current.push(pt);
+  for (const chunk of d.match(/[ML][^ML]*/g) ?? []) {
+    const cmd = chunk[0];
+    const nums = (chunk.slice(1).match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+    for (let i = 0; i + 1 < nums.length; i += 2) {
+      const pt = [nums[i], nums[i + 1]];
+      if (cmd === "M" && i === 0) {
+        current = [pt];
+        strokes.push(current);
+      } else if (current) {
+        current.push(pt); // implicit lineto
+      }
     }
   }
   return strokes.filter((s) => s.length >= 2);
