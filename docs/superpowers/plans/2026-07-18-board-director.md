@@ -134,6 +134,57 @@ conversation produces an ordered script; a malformed tool input produces a
 tool_result error and the corrected retry is accepted; the loop terminates on
 `end_turn`; a tool-call cap prevents runaways.
 
+### Task 3.5: `packages/verifier` — deterministic step checking
+
+**Why this exists (design §4.5).** The director writes 6–12 visible steps to a
+student who cannot check them. Whole-solution accuracy is per-step accuracy
+compounded: 99% per step over 10 steps is only ~90% of solutions clean, and
+95% of solutions needs ~99.5% per step. Extended thinking and a self-check
+prompt alone do not reach that. Most of the error class — arithmetic slips,
+dropped signs, silently changed units — is mechanically checkable, so buy the
+reliability with verification rather than with model size.
+
+**Files:** `packages/verifier/…`, depends on `@teacher/protocol` only.
+
+```ts
+type Verdict =
+  | { status: "ok" }
+  | { status: "failed"; reason: string }      // returned to the director
+  | { status: "unchecked"; reason: string };  // not blocking; lowers confidence
+export function verifyStep(prev: string | null, next: string): Verdict
+export function verifyScript(script: BoardScript): Verdict[]
+```
+
+Scope deliberately narrow — a check that is wrong is worse than no check:
+
+- **Numeric spot-check of claimed equalities.** For consecutive steps that are
+  equations in one variable, sample the free variable at several points and
+  confirm both sides agree (within tolerance) for `prev` and `next`. Catches
+  sign errors and arithmetic slips without needing full CAS equivalence.
+- **Solved-root substitution.** When a step asserts `x = <value>`, substitute
+  back into the earliest equation of the derivation and confirm it satisfies.
+  This is the single highest-value check: it catches a wrong final answer
+  outright.
+- **Dimensional check** — deferred to P4 with physics content; state so
+  explicitly rather than half-building it.
+
+Reuse `@teacher/board-layout`'s expression evaluator rather than writing a
+second parser — extract it to a shared module if that is cleaner. Anything not
+confidently checkable returns `unchecked`, never `failed`: a false accusation
+of error would make the director re-derive correct work.
+
+**Wiring:** Task 3's loop calls `verifyStep` before accepting a `write_math`
+tool call. A `failed` verdict is returned as a `tool_result` error naming the
+suspect step, so the director re-derives before any ink reaches the board —
+the same self-correction path as an invalid board op (design §6).
+
+**Verify:** catches a planted sign error (`2x+3=7 → 2x=10`); catches a wrong
+root (`x^2-5x+6=0 → x=4`); accepts a correct 6-step quadratic derivation with
+no false positives; returns `unchecked` (not `failed`) for a step it cannot
+parse; a correct derivation through a `\frac` and a `\sqrt` is not flagged.
+**No-false-positive behaviour matters more than coverage here** — test it on at
+least 20 correct derivations and assert zero `failed`.
+
 ### Task 4: `apps/server` — HTTP endpoint
 
 `POST /solve {question}` → `BoardScript`. Node's built-in `http`, no framework.
@@ -170,8 +221,11 @@ canned answer is graded incorrect.
 
 ## Sequencing
 
-1 → 2 can proceed immediately and are fully verifiable offline. 3 → 4 need the
-SDK but not a key. 5 is visual. 6 needs a key to be meaningful.
+1 → 2 → 3.5 can proceed immediately and are fully verifiable offline. 3 → 4
+need the SDK but not a key. 5 is visual. 6 needs a key to be meaningful.
+
+Task 3.5 is independent of Task 3 and worth doing first: it needs no SDK and no
+key, and it is the change most likely to move end-to-end correctness.
 
 ## Self-review notes
 
@@ -181,6 +235,8 @@ SDK but not a key. 5 is visual. 6 needs a key to be meaningful.
 - `BoardObject` from design §4.3 is deliberately omitted: nothing in P2 erases
   or references prior objects, and inventing the identity scheme before P4's
   requirements exist would be speculative.
-- Biggest residual risk is unchanged from the design: the model being confidently
-  wrong about maths. Task 6 measures it; extended thinking and the self-check
-  prompt are the mitigations.
+- Biggest residual risk is the model being confidently wrong about maths. Task
+  3.5's verifier is the primary mitigation, extended thinking and the
+  self-check prompt are secondary, and Task 6 measures what survives.
+- Student handwriting is **not** read (design §5 Flow D, decided 2026-07-18).
+  Nothing in P2 depends on it; P4 takes the student's stated answer instead.
