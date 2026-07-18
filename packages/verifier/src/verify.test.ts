@@ -57,12 +57,6 @@ describe("verifyScript", () => {
   });
 
   it("accepts a correct 6-step quadratic derivation end to end", () => {
-    // Note: "(x-2)(x-3)=0" -> "x-2=0" (the zero-product-property split) is
-    // deliberately NOT included here -- it drops a root, so it is not a
-    // ratio-preserving transform of the equation, and the numeric spot
-    // check correctly can't vouch for it as a whole-equation rewrite. Every
-    // step below either preserves the full equation (ratio test) or states
-    // a solved root checked by direct substitution into the anchor.
     const s = script([
       "x^2-5x+6=0",
       "2x^2-10x+12=0",
@@ -75,6 +69,32 @@ describe("verifyScript", () => {
     expect(verdicts.some((v) => v.status === "failed")).toBe(false);
   });
 
+  it("accepts the zero-product case split (a case split narrows the root set, which is valid)", () => {
+    const s = script(["x^2-5x+6=0", "(x-2)(x-3)=0", "x-2=0", "x=2", "x-3=0", "x=3"]);
+    const verdicts = verifyScript(s);
+    expect(verdicts.filter((v) => v.status === "failed")).toEqual([]);
+    expect(verdicts[1].status).toBe("ok");
+    expect(verdicts[2].status).toBe("ok");
+    expect(verdicts[3].status).toBe("ok");
+    expect(verdicts[4].status).toBe("ok");
+    expect(verdicts[5].status).toBe("ok");
+  });
+
+  it("accepts a case split on a difference of squares", () => {
+    const s = script(["x^2-9=0", "(x-3)(x+3)=0", "x-3=0", "x=3"]);
+    const verdicts = verifyScript(s);
+    expect(verdicts.filter((v) => v.status === "failed")).toEqual([]);
+    expect(verdicts[2].status).toBe("ok");
+  });
+
+  it("anchors to the earliest equation, not the previous step, after a solved root", () => {
+    // "x-3=0" follows "x=2"; comparing against the previous step would be
+    // meaningless. It must be judged against the anchor.
+    const s = script(["x^2-5x+6=0", "x=2", "x-3=0"]);
+    const verdicts = verifyScript(s);
+    expect(verdicts[2].status).toBe("ok");
+  });
+
   it("accepts a correct derivation containing \\frac and \\sqrt", () => {
     const s = script([
       "\\frac{x}{2}+\\sqrt{4}=5",
@@ -83,6 +103,20 @@ describe("verifyScript", () => {
     ]);
     const verdicts = verifyScript(s);
     expect(verdicts.some((v) => v.status === "failed")).toBe(false);
+  });
+
+  it("catches a case split onto a factor that is not a real factor", () => {
+    // The split is structurally plausible but 5 is not a root of the anchor.
+    const s = script(["x^2-5x+6=0", "(x-2)(x-3)=0", "x-5=0"]);
+    const verdicts = verifyScript(s);
+    expect(verdicts[2].status).toBe("failed");
+  });
+
+  it("catches a sign slip mid-derivation and the root that follows from it", () => {
+    const s = script(["2x+3=7", "2x=10", "x=5"]);
+    const verdicts = verifyScript(s);
+    expect(verdicts[1].status).toBe("failed");
+    expect(verdicts[2].status).toBe("failed");
   });
 
   it("catches a wrong root planted among two correct ones", () => {
@@ -106,12 +140,16 @@ describe("no-false-positive suite: correct derivations must never be flagged fai
     "L7: x/3+2=5": ["\\frac{x}{3}+2=5", "\\frac{x}{3}=3", "x=9"],
     "L8: 2(x+3)=10": ["2(x+3)=10", "2x+6=10", "2x=4", "x=2"],
 
-    // --- Quadratics via factoring ---
-    "Q1: x^2-5x+6=0": ["x^2-5x+6=0", "(x-2)(x-3)=0", "x=2", "x=3"],
-    "Q2: x^2-x-6=0": ["x^2-x-6=0", "(x-3)(x+2)=0", "x=3", "x=-2"],
-    "Q3: x^2-9=0": ["x^2-9=0", "(x-3)(x+3)=0", "x=3", "x=-3"],
-    "Q4: x^2+2x-8=0": ["x^2+2x-8=0", "(x+4)(x-2)=0", "x=-4", "x=2"],
-    "Q5: 2x^2-8=0": ["2x^2-8=0", "x^2-4=0", "(x-2)(x+2)=0", "x=2", "x=-2"],
+    // --- Quadratics via factoring, INCLUDING the zero-product case split
+    // (`(x-2)(x-3)=0` -> `x-2=0`), which is the most common shape at this
+    // level and must never be flagged. ---
+    "Q1: x^2-5x+6=0": ["x^2-5x+6=0", "(x-2)(x-3)=0", "x-2=0", "x=2", "x-3=0", "x=3"],
+    "Q2: x^2-x-6=0": ["x^2-x-6=0", "(x-3)(x+2)=0", "x-3=0", "x=3", "x+2=0", "x=-2"],
+    "Q3: x^2-9=0": ["x^2-9=0", "(x-3)(x+3)=0", "x-3=0", "x=3", "x+3=0", "x=-3"],
+    "Q4: x^2+2x-8=0": ["x^2+2x-8=0", "(x+4)(x-2)=0", "x+4=0", "x=-4", "x-2=0", "x=2"],
+    "Q5: 2x^2-8=0": ["2x^2-8=0", "x^2-4=0", "(x-2)(x+2)=0", "x-2=0", "x=2", "x+2=0", "x=-2"],
+    "Q6: x^2-4x+4=0 (repeated root)": ["x^2-4x+4=0", "(x-2)(x-2)=0", "x-2=0", "x=2"],
+    "Q7: x^2+5x=0": ["x^2+5x=0", "x(x+5)=0", "x=0", "x+5=0", "x=-5"],
 
     // --- Quadratics via the quadratic formula (roots checked against the
     // anchor via Check B, sidestepping the ratio test entirely for the
