@@ -42,6 +42,19 @@ describe("glyph library", () => {
       expect(inkHeight, `glyph ${ch} collapsed`).toBeGreaterThan(0.3);
     }
   });
+  it("glyph ink fits inside its advance, so neighbours never collide", () => {
+    // 'F' and 'L' overhang their right bearing by one unit in the source
+    // futural data; every other glyph sits inside its advance box.
+    const FONT_OVERHANG = new Set(["F", "L"]);
+    for (let code = 33; code < 127; code++) {
+      const ch = String.fromCharCode(code);
+      const g = getGlyph(ch);
+      if (!g || g.strokes.length === 0 || FONT_OVERHANG.has(ch)) continue;
+      const xs = g.strokes.flat().map((p) => p.x);
+      expect(Math.min(...xs), `glyph ${ch} starts left of its origin`).toBeGreaterThanOrEqual(0);
+      expect(Math.max(...xs), `glyph ${ch} overflows its advance`).toBeLessThanOrEqual(g.advance);
+    }
+  });
   it("unknown char returns undefined; fallback exists", () => {
     expect(getGlyph("☃")).toBeUndefined();
     expect(FALLBACK_GLYPH.strokes.length).toBeGreaterThan(0);
