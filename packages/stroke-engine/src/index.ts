@@ -10,7 +10,13 @@ export type { MathLayout, GlyphPlacement, LineSeg } from "./math/layout";
 export { realizeLayout } from "./realize";
 export { diagramStrokes } from "./diagrams";
 export type { Diagram } from "./diagrams";
-export { buildPlan, STROKE_GAP_MS } from "./planner";
-export type { Op, PenStroke, RenderPlan } from "./planner";
+export {
+  buildPlan,
+  planDurationMs,
+  LayoutOverflowError,
+  STROKE_GAP_MS,
+  PAGE_BREAK_MS,
+} from "./planner";
+export type { Op, DrawOp, Board, PenStroke, RenderPlan } from "./planner";
 export { renderFrame, Player } from "./render";
 export type { StrokeCtx } from "./render";
