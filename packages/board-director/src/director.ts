@@ -1,3 +1,4 @@
+import { checkRenderable } from "@teacher/board-layout";
 import { BoardStepSchema, parseBoardScript } from "@teacher/protocol";
 import type { BoardScript, BoardStep } from "@teacher/protocol";
 import { verifyStep } from "@teacher/verifier";
@@ -99,11 +100,19 @@ interface ToolOutcome {
 
 /**
  * Validates one tool call against the protocol's zod schema (re-attaching
- * the `kind` the tool name implies) and, for `write_math`, runs the
- * verifier against the derivation's anchor equation. Never throws --
- * failures come back as a `ToolOutcome` with `isError: true` so the caller
- * can report them to the model as a `tool_result` instead of crashing the
- * loop or silently accepting a bad step.
+ * the `kind` the tool name implies), then, for `write_math`, checks that the
+ * stroke engine can actually render the TeX before running the verifier
+ * against the derivation's anchor equation. Never throws -- failures come
+ * back as a `ToolOutcome` with `isError: true` so the caller can report them
+ * to the model as a `tool_result` instead of crashing the loop or silently
+ * accepting a bad step.
+ *
+ * Renderability is checked before arithmetic verification and regardless of
+ * `verify`: if the engine can't even parse the TeX, that's the most
+ * actionable error to hand back, and there's no point verifying arithmetic
+ * in a string that will never reach the board (Bug 4 -- `parseMath` threw on
+ * `\boxed`/`\quad` at layout time, downstream of this loop entirely, and
+ * discarded an otherwise-correct 9-step derivation).
  */
 function handleToolCall(call: ToolCall, verify: boolean, anchorTex: string | null): ToolOutcome {
   const kind = TOOL_TO_STEP_KIND[call.name];
@@ -130,13 +139,23 @@ function handleToolCall(call: ToolCall, verify: boolean, anchorTex: string | nul
 
   const step = parsed.data;
 
-  if (verify && step.kind === "math") {
-    const verdict = verifyStep(anchorTex, step.tex);
-    if (verdict.status === "failed") {
+  if (step.kind === "math") {
+    const renderable = checkRenderable(step.tex);
+    if (!renderable.ok) {
       return {
-        content: `verification failed for "${step.tex}": ${verdict.reason}. Re-derive this step -- do not write it as-is.`,
+        content: `cannot render "${step.tex}": ${renderable.reason}. Re-emit this step using only the supported TeX subset -- no \\boxed, \\quad, or other commands outside it.`,
         isError: true,
       };
+    }
+
+    if (verify) {
+      const verdict = verifyStep(anchorTex, step.tex);
+      if (verdict.status === "failed") {
+        return {
+          content: `verification failed for "${step.tex}": ${verdict.reason}. Re-derive this step -- do not write it as-is.`,
+          isError: true,
+        };
+      }
     }
   }
 

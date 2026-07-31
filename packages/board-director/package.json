@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
+    "@teacher/board-layout": "*",
     "@teacher/protocol": "*",
     "@teacher/verifier": "*",
     "zod": "^3.23.0",
