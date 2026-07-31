@@ -107,7 +107,7 @@ Walks the steps top to bottom, assigning each a baseline from a running cursor:
 next line down; ink stays inside the board; the evaluator computes `x^2` and
 `sin(x)` correctly and rejects `process.exit(1)`.
 
-### Task 3: `packages/board-director` — the Claude loop
+### Task 3: `packages/board-director` — the director loop
 
 **Files:** `packages/board-director/…`, depends on `@anthropic-ai/sdk`, protocol
 
@@ -115,6 +115,32 @@ next line down; ink stays inside the board; the evaluator computes `x^2` and
 interface DirectorClient { createMessage(req): Promise<Response> } // injectable
 solveProblem(question: string, client: DirectorClient, opts?): Promise<BoardScript>
 ```
+
+**Providers.** `DirectorClient` has three implementations behind one interface,
+selected by `TEACHER_PROVIDER`:
+
+| Impl | Used for |
+|---|---|
+| `AnthropicClient` | production (`@anthropic-ai/sdk`) |
+| `OpenAICompatClient` | Groq, Cerebras, OpenRouter, Ollama, LM Studio |
+| `FakeClient` | tests — deterministic, no network |
+
+Free-tier providers speak the **OpenAI** API, whose tool-call request/response
+shape differs from Anthropic's, so the adapter — not the loop — owns the
+translation. The loop only ever sees the internal shape. This keeps free local
+models usable for pipeline testing while production stays on Anthropic.
+
+**One key per provider.** Failover goes *across* providers (Groq → Cerebras →
+OpenRouter), never across several keys of the same provider. Multi-key rotation
+within one provider either does nothing (limits are per account, not per key)
+or circumvents the per-account limit, which the free tiers prohibit; and
+cross-provider failover delivers the same practical capacity honestly.
+
+**Free-model caveat.** Small models are unreliable at tool calling — expect
+malformed calls that the schema-validation path must absorb. Free providers are
+fine for exercising the pipeline and for generating realistic *wrong*
+derivations to test the verifier against; they are not valid for Task 6's
+correctness evals, which would measure the model rather than the system.
 
 - Tools exposed to the model: `write_math`, `write_text`, `draw_diagram`,
   `new_page` — the design §4.2 set minus the ones needing student ink or

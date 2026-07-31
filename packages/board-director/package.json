@@ -1,0 +1,22 @@
+{
+  "name": "@teacher/board-director",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@teacher/protocol": "*",
+    "@teacher/verifier": "*",
+    "zod": "^3.23.0",
+    "zod-to-json-schema": "^3.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
