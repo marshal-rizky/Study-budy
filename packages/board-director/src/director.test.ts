@@ -315,6 +315,55 @@ describe("solveProblem", () => {
     expect(result.script.steps).toEqual([]);
   });
 
+  it("rejects a write_math step the stroke engine cannot render (Bug 4), then accepts the corrected retry", async () => {
+    const client = new FakeClient([
+      toolUse("1", "write_math", { tex: "x = \\frac{2}{4} \\boxed{\\frac{1}{2}}, \\quad y=1", narration: "boxed answer" }),
+      toolUse("2", "write_math", { tex: "x = \\frac{1}{2}", narration: "corrected" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("solve", client, { verify: false });
+
+    // The unrenderable step never made it into the script; only the correction did.
+    expect(script.steps).toEqual([{ kind: "math", tex: "x = \\frac{1}{2}", narration: "corrected" }]);
+
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "1");
+
+    expect(errorResult).toBeDefined();
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("\\boxed");
+  });
+
+  it("renderability is checked even when verify is off and even for the unverifiable anchor step", async () => {
+    // \boxed{x} is the FIRST math step, so anchorTex is null when it's evaluated -- the
+    // verifier would score a null-anchor step "unchecked" (never "failed"; see
+    // verifyOneStep), so if renderability ran only inside the `verify` branch, or after
+    // the verifier instead of before it, this bad step would slip through when verify
+    // is false. Renderability must catch it regardless.
+    const client = new FakeClient([
+      toolUse("1", "write_math", { tex: "\\boxed{x}", narration: "boxed" }),
+      toolUse("2", "write_math", { tex: "x = 1", narration: "corrected" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("solve", client, { verify: false });
+
+    expect(script.steps).toEqual([{ kind: "math", tex: "x = 1", narration: "corrected" }]);
+
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "1");
+
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("\\boxed");
+  });
+
   it("solveProblemDetailed reports usage totals matching the sum of the fake's reported usage", async () => {
     const client = new FakeClient([
       toolUseWithUsage("1", "write_text", { text: "step", narration: "n" }, {
