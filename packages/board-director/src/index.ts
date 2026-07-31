@@ -10,8 +10,8 @@ export { RetryableDirectorError } from "./client";
 
 export { TOOLS, TOOL_TO_STEP_KIND } from "./tools";
 
-export type { SolveOptions } from "./director";
-export { solveProblem } from "./director";
+export type { SolveOptions, DirectorUsage, SolveResult } from "./director";
+export { solveProblem, solveProblemDetailed } from "./director";
 
 export { AnthropicClient } from "./clients/anthropic";
 export type { AnthropicClientOptions, AnthropicMessagesLike } from "./clients/anthropic";

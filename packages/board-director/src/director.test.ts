@@ -2,10 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { DirectorClient, DirectorRequest, DirectorResponse } from "./client";
 import { RetryableDirectorError } from "./client";
 import { FakeClient } from "./clients/fake";
-import { solveProblem } from "./director";
+import { solveProblem, solveProblemDetailed } from "./director";
 
 function toolUse(id: string, name: string, input: unknown): DirectorResponse {
   return { toolCalls: [{ id, name, input }], text: "", stopReason: "tool_use" };
+}
+
+function toolUseWithUsage(
+  id: string,
+  name: string,
+  input: unknown,
+  usage: { inputTokens: number; outputTokens: number }
+): DirectorResponse {
+  return { toolCalls: [{ id, name, input }], text: "", stopReason: "tool_use", usage };
 }
 
 const END_TURN: DirectorResponse = { toolCalls: [], text: "Done.", stopReason: "end_turn" };
@@ -147,5 +156,56 @@ describe("solveProblem", () => {
     };
     await expect(solveProblem("q", hardFailure)).rejects.toThrow("not retryable");
     expect(nonRetryableCalls).toBe(1); // never retried
+  });
+
+  it("stops once cumulative token usage reaches maxTotalTokens, returning the script built so far", async () => {
+    const client = new FakeClient([
+      toolUseWithUsage("1", "write_math", { tex: "x=1", narration: "first" }, {
+        inputTokens: 60,
+        outputTokens: 20,
+      }), // running total 80
+      toolUseWithUsage("2", "write_text", { text: "second", narration: "n" }, {
+        inputTokens: 30,
+        outputTokens: 10,
+      }), // running total 120 -- crosses the cap of 100
+      toolUse("3", "write_text", { text: "third, should never be requested", narration: "n" }),
+    ]);
+
+    const script = await solveProblem("q", client, { maxTotalTokens: 100, verify: false });
+
+    // Both in-flight responses are honored (the cap is only checked before issuing the
+    // *next* request), but the third request -- which would add a step -- never happens.
+    expect(script.steps).toEqual([
+      { kind: "math", tex: "x=1", narration: "first" },
+      { kind: "text", text: "second", narration: "n" },
+    ]);
+    expect(client.requests).toHaveLength(2);
+  });
+
+  it("treats missing response.usage as zero spend and does not crash", async () => {
+    const client = new FakeClient([
+      toolUse("1", "write_text", { text: "hello", narration: "n" }), // no `usage` field at all
+      END_TURN, // also no `usage`
+    ]);
+
+    const script = await solveProblem("q", client, { maxTotalTokens: 100, verify: false });
+
+    expect(script.steps).toEqual([{ kind: "text", text: "hello", narration: "n" }]);
+    expect(client.requests).toHaveLength(2);
+  });
+
+  it("solveProblemDetailed reports usage totals matching the sum of the fake's reported usage", async () => {
+    const client = new FakeClient([
+      toolUseWithUsage("1", "write_text", { text: "step", narration: "n" }, {
+        inputTokens: 15,
+        outputTokens: 5,
+      }),
+      { toolCalls: [], text: "done", stopReason: "end_turn", usage: { inputTokens: 8, outputTokens: 2 } },
+    ]);
+
+    const result = await solveProblemDetailed("q", client, { verify: false });
+
+    expect(result.script.steps).toEqual([{ kind: "text", text: "step", narration: "n" }]);
+    expect(result.usage).toEqual({ inputTokens: 23, outputTokens: 7, toolCalls: 1 });
   });
 });

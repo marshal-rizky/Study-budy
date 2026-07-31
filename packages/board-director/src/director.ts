@@ -10,14 +10,35 @@ export interface SolveOptions {
   maxToolCalls?: number;
   /** Passed through to the client as the per-call token budget. */
   maxTokens?: number;
+  /**
+   * Cumulative spend guard across the whole loop (input + output tokens,
+   * summed from each response's `usage`). Free-tier providers bill against
+   * per-day quotas, so this bounds total spend independently of
+   * `maxToolCalls` -- a loop emitting long steps could otherwise burn a
+   * day's quota well before hitting the call-count cap. Default 60000.
+   */
+  maxTotalTokens?: number;
   /** Run each write_math step through the verifier before accepting it. */
   verify?: boolean;
   /** Deterministic id for the resulting script (design Flow C's stale-script guard). */
   scriptId?: string;
 }
 
+/** Token/call totals for one `solveProblem` run, for callers that want to log spend. */
+export interface DirectorUsage {
+  inputTokens: number;
+  outputTokens: number;
+  toolCalls: number;
+}
+
+export interface SolveResult {
+  script: BoardScript;
+  usage: DirectorUsage;
+}
+
 const DEFAULT_MAX_TOOL_CALLS = 24;
 const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_MAX_TOTAL_TOKENS = 60000;
 const DEFAULT_SCRIPT_ID = "script-1";
 
 const MAX_REQUEST_ATTEMPTS = 3;
@@ -117,18 +138,25 @@ async function createMessageWithRetry(
 
 /**
  * Drives the agentic tool-use loop that turns a question into a validated
- * `BoardScript`. The model never emits coordinates -- only semantic steps
- * via the four tools in `tools.ts` -- and every step is validated through
- * the protocol's zod schema (and, for math, the verifier) before it is
- * accepted into the script.
+ * `BoardScript`, and reports token/call totals alongside it. The model
+ * never emits coordinates -- only semantic steps via the four tools in
+ * `tools.ts` -- and every step is validated through the protocol's zod
+ * schema (and, for math, the verifier) before it is accepted into the
+ * script.
+ *
+ * Two runaway guards bound the loop independently: `maxToolCalls` caps the
+ * number of steps, `maxTotalTokens` caps cumulative spend (input + output
+ * tokens summed across every response). Either one stops the loop and
+ * returns the script built so far -- never throws for hitting a cap.
  */
-export async function solveProblem(
+export async function solveProblemDetailed(
   question: string,
   client: DirectorClient,
   opts: SolveOptions = {}
-): Promise<BoardScript> {
+): Promise<SolveResult> {
   const maxToolCalls = opts.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
   const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const maxTotalTokens = opts.maxTotalTokens ?? DEFAULT_MAX_TOTAL_TOKENS;
   const verify = opts.verify ?? true;
   const scriptId = opts.scriptId ?? DEFAULT_SCRIPT_ID;
 
@@ -136,14 +164,22 @@ export async function solveProblem(
   const steps: BoardStep[] = [];
   let anchorTex: string | null = null;
   let toolCallCount = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
 
-  while (toolCallCount < maxToolCalls) {
+  while (toolCallCount < maxToolCalls && inputTokens + outputTokens < maxTotalTokens) {
     const response = await createMessageWithRetry(client, {
       system: SYSTEM_PROMPT,
       messages,
       tools: TOOLS,
       maxTokens,
     });
+
+    // Some OpenAI-compatible providers omit `usage` entirely -- treat that as 0
+    // spend rather than crashing; it just means this call doesn't count against
+    // the cumulative cap.
+    inputTokens += response.usage?.inputTokens ?? 0;
+    outputTokens += response.usage?.outputTokens ?? 0;
 
     messages.push({
       role: "assistant",
@@ -179,5 +215,16 @@ export async function solveProblem(
     if (toolCallCount >= maxToolCalls) break;
   }
 
-  return parseBoardScript({ scriptId, steps });
+  const script = parseBoardScript({ scriptId, steps });
+  return { script, usage: { inputTokens, outputTokens, toolCalls: toolCallCount } };
+}
+
+/** Convenience wrapper over `solveProblemDetailed` for callers that only want the script. */
+export async function solveProblem(
+  question: string,
+  client: DirectorClient,
+  opts: SolveOptions = {}
+): Promise<BoardScript> {
+  const { script } = await solveProblemDetailed(question, client, opts);
+  return script;
 }
