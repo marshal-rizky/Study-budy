@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { verifyStep } from "@teacher/verifier";
 import type { DirectorClient, DirectorRequest, DirectorResponse } from "./client";
 import { RetryableDirectorError } from "./client";
 import { FakeClient } from "./clients/fake";
@@ -335,7 +336,13 @@ describe("solveProblem", () => {
 
     expect(errorResult).toBeDefined();
     expect(errorResult?.isError).toBe(true);
-    expect(errorResult?.content).toContain("\\boxed");
+    // Assert on the engine's actual diagnostic, not just that the static part of the
+    // error template mentions "\boxed" -- the template's trailing sentence names
+    // \boxed unconditionally regardless of what the engine actually reported, so
+    // `toContain("\\boxed")` alone would pass even if `renderable.reason` were wrong
+    // or empty. "unknown command \boxed" only appears if the engine's own message
+    // made it into `content`.
+    expect(errorResult?.content).toContain("unknown command \\boxed");
   });
 
   it("renderability is checked even when verify is off and even for the unverifiable anchor step", async () => {
@@ -361,7 +368,48 @@ describe("solveProblem", () => {
       .find((r) => r.id === "1");
 
     expect(errorResult?.isError).toBe(true);
-    expect(errorResult?.content).toContain("\\boxed");
+    // Same discrimination as above: the engine's own diagnostic, not the static
+    // template text.
+    expect(errorResult?.content).toContain("unknown command \\boxed");
+  });
+
+  it("checks renderability BEFORE verification even when the same step would also fail verification, proving order rather than just presence (Bug 4)", async () => {
+    // \cdot is a case where the two parsers disagree: the stroke engine's parseMath
+    // does not know it (rejected -- see stroke-engine's SYMBOL_COMMANDS), but the
+    // verifier's texToExpr does (it maps \cdot -> "*", see tex-to-expr.ts's
+    // OPERATOR_COMMANDS) and can therefore evaluate this step's arithmetic. That
+    // means this exact tex is BOTH unrenderable AND -- confirmed directly below --
+    // would fail arithmetic verification if verifyStep ran on it. If renderability
+    // were checked after verifyStep (or removed and rendered moot by verify alone),
+    // the tool_result would read "verification failed"; because it's checked first,
+    // it must read the engine's parse diagnostic instead. A test using verify:false
+    // (as the two tests above do) cannot distinguish these -- it only proves
+    // verify-independence, not ordering.
+    const verifyVerdict = verifyStep("2x+3=7", "2 \\cdot x=10");
+    expect(verifyVerdict).toEqual({
+      status: "failed",
+      reason: "x=5 solves 2 \\cdot x=10 but does not satisfy 2x+3=7 (residual 6)",
+    });
+
+    const client = new FakeClient([
+      toolUse("1", "write_math", { tex: "2x+3=7", narration: "anchor" }),
+      toolUse("2", "write_math", { tex: "2 \\cdot x=10", narration: "wrong and unrenderable" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("solve 2x+3=7", client, { verify: true });
+
+    expect(script.steps).toEqual([{ kind: "math", tex: "2x+3=7", narration: "anchor" }]);
+
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "2");
+
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("unknown command \\cdot");
+    expect(errorResult?.content).not.toContain("verification failed");
   });
 
   it("solveProblemDetailed reports usage totals matching the sum of the fake's reported usage", async () => {
