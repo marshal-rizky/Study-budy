@@ -88,7 +88,7 @@ A versioned markdown "teaching constitution" (iterable without code changes) app
 - **Socratic default**: never dump the answer; probing questions, graduated hints, ask the student to explain back.
 - **Active learning**: student manipulates ideas (fills blanks the teacher leaves on the board: `2x = __`).
 - **Cognitive load**: one concept per step; board mirrors step-by-step structure.
-- **Adaptivity**: probe prior knowledge first, adjust level.
+- **Adaptivity**: probe prior knowledge first, adjust level. **Across sessions, not just within one** — a tutor that re-probes from zero every session, and cannot notice that the same concept has failed three weeks running, is not adaptive in any useful sense. Backed by the student model (§4.6).
 - **Motivation**: encouragement, never shame errors.
 - **Metacognition**: prompt reflection ("how would you check this answer?").
 - **Homework rule**: in document mode, annotate hints on the sheet, never write final answers on the student's homework.
@@ -119,6 +119,46 @@ This does not cover **misconception diagnosis** — inferring which wrong path p
 answer. That is abduction from sparse evidence, is harder than solving forward, and is where model
 capability genuinely has to be paid for. Hence the most capable available model for this brain, and
 a fast cheap one for voice (§3).
+
+### 4.6 Student model (cross-session memory)
+
+§4.4 requires adaptivity, which is only meaningful if the tutor remembers the
+student. Session transcripts alone do not deliver it: replaying last week's
+conversation into context is expensive, lossy, and does not answer the question
+the teacher actually needs answered — *what does this student know, and where
+do they habitually go wrong?*
+
+**Shape.** A small structured record per student, not a transcript archive and
+not a graph:
+
+```
+student_id
+concept            e.g. "quadratic.factoring", "kinematics.suvat"
+attempts, successes, last_seen
+observed_errors    e.g. ["sign error when distributing", "drops the second root"]
+level_estimate
+```
+
+**Lifecycle.** Written at session end by a summarisation pass over the
+transcript and the verifier's verdicts — note that verifier `failed` verdicts
+on *the student's* stated answers are already a structured error signal, so the
+model is not the only source. Read at session start: the board director loads
+the rows for the topic in play; the voice brain gets a one-paragraph digest.
+
+**Why deliberately small.** Consistent with §4.5 and the layout engine: prefer
+inspectable state and deterministic code over model-held context. A teacher,
+a parent, or the student should be able to read this record and see why the
+lesson was pitched where it was. A learned embedding or a graph cannot be
+audited that way, and nothing here needs one.
+
+**Scaling note.** Hierarchical, temporally-aware retrieval (cf. LiCoMemory) is
+the known prior art once memory outgrows the context window. For one student
+over months of tutoring, rows plus a digest should hold; revisit only if that
+breaks. See [assessment](../notes/2026-07-31-external-tools-assessment.md) §3.
+
+**Privacy.** This is durable data about a learner, likely a minor: store it
+locally by default, make it exportable and deletable, and keep it out of any
+telemetry. To be settled before P7 ships, not after.
 
 ## 5. Data flow & sync
 
@@ -201,8 +241,14 @@ Claude script slower than 2.5 s → voice fills naturally ("let me write this ou
 | **P4 — Student ink + pedagogy** | Student board access, answers stated by voice/text (no ink reading — Flow D), pedagogy spec + eval harness | Interactivity + teaching quality |
 | **P5 — Document mode** | PDF upload, problem map, document annotation, split view | Homework use case |
 | **P6 — Lessons + polish** | Teacher-led lesson plans, subject content packs, session persistence | Product completeness |
+| **P7 — Student model** | Cross-session student record (§4.6), written at session end and read at session start; adaptivity driven by history; local storage, export and delete | Does the tutor actually get better at teaching *this* student, or restart from zero every week? |
 
-**Later (post-P6):** desktop app packaging (Tauri/Electron); ML handwriting synthesis swap-in (approach C).
+**Later (post-P7):** desktop app packaging (Tauri/Electron); ML handwriting synthesis swap-in (approach C).
+
+**Sequencing note:** P7 sits after P4 in dependency terms — it needs the
+student's stated answers and the pedagogy spec to have something worth
+recording — but it could be pulled earlier if returning students appear before
+P6 lands. It is the difference between a homework tool and a tutor.
 
 ## 9. Open questions (deferred, not blocking)
 
