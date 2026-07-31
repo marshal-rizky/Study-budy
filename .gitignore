@@ -1,3 +1,9 @@
 .superpowers/
 node_modules/
 .claude/settings.local.json
+
+# secrets -- never commit API keys
+.env
+.env.*
+!.env.example
+*.key
