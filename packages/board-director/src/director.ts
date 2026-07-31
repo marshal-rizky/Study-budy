@@ -83,7 +83,12 @@ function handleToolCall(call: ToolCall, verify: boolean, anchorTex: string | nul
 
   const inputObj =
     typeof call.input === "object" && call.input !== null ? (call.input as Record<string, unknown>) : {};
-  const candidate = { kind, ...inputObj };
+  // `kind` must come LAST: it's derived from the tool name the model actually called,
+  // which is authoritative. A model-supplied `kind` in the input (small models echo
+  // schema-adjacent fields routinely) must never override it -- if it could, a
+  // write_math call carrying {kind:"text", ...} would validate as a text step and skip
+  // the verifier entirely, putting unchecked algebra on the board.
+  const candidate = { ...inputObj, kind };
 
   const parsed = BoardStepSchema.safeParse(candidate);
   if (!parsed.success) {
@@ -168,12 +173,21 @@ export async function solveProblemDetailed(
   let outputTokens = 0;
 
   while (toolCallCount < maxToolCalls && inputTokens + outputTokens < maxTotalTokens) {
-    const response = await createMessageWithRetry(client, {
-      system: SYSTEM_PROMPT,
-      messages,
-      tools: TOOLS,
-      maxTokens,
-    });
+    let response: DirectorResponse;
+    try {
+      response = await createMessageWithRetry(client, {
+        system: SYSTEM_PROMPT,
+        messages,
+        tools: TOOLS,
+        maxTokens,
+      });
+    } catch {
+      // Terminal client error -- retries (if any applied) are exhausted, or the
+      // failure was never retryable to begin with. A partial, already-verified
+      // script is worth more than an exception: stop here and return what we
+      // have, with the same "return what's accumulated" contract as the caps.
+      break;
+    }
 
     // Some OpenAI-compatible providers omit `usage` entirely -- treat that as 0
     // spend rather than crashing; it just means this call doesn't count against
@@ -185,6 +199,9 @@ export async function solveProblemDetailed(
       role: "assistant",
       toolCalls: response.toolCalls,
       text: response.text.length > 0 ? response.text : undefined,
+      // Opaque to the loop -- only the adapter that produced it (if any) knows
+      // what to do with it. Carried verbatim so it can be replayed next turn.
+      providerBlocks: response.providerBlocks,
     });
 
     if (response.toolCalls.length === 0) {
@@ -211,8 +228,19 @@ export async function solveProblemDetailed(
 
     messages.push({ role: "tool_results", results });
 
-    if (response.stopReason === "end_turn") break;
     if (toolCallCount >= maxToolCalls) break;
+    // No stopReason==="end_turn" check here: for a spec-compliant provider,
+    // toolCalls is always empty exactly when stop_reason isn't tool-use (the
+    // `toolCalls.length === 0` branch above already handles that case), so
+    // this point is only reached with toolCalls.length > 0 -- meaning a
+    // compliant provider's stopReason literally cannot be "end_turn" here.
+    // A non-compliant free-tier provider that *does* report "end_turn"
+    // alongside tool calls is exactly the unreliable-tool-calling case the
+    // plan warns about; trusting that signal to stop risks truncating a
+    // derivation the model intended to continue. Not trusting it costs at
+    // most one harmless extra request that self-terminates on the next
+    // iteration via the toolCalls.length === 0 check. Investigated and
+    // removed rather than kept as dead-for-good, risky-for-bad code.
   }
 
   const script = parseBoardScript({ scriptId, steps });

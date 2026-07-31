@@ -26,7 +26,7 @@ export interface DirectorRequest {
 
 export type DirectorMessage =
   | { role: "user"; content: string }
-  | { role: "assistant"; toolCalls: ToolCall[]; text?: string }
+  | { role: "assistant"; toolCalls: ToolCall[]; text?: string; providerBlocks?: unknown[] }
   | { role: "tool_results"; results: { id: string; content: string; isError: boolean }[] };
 
 export interface DirectorResponse {
@@ -34,6 +34,14 @@ export interface DirectorResponse {
   text: string;
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "other";
   usage?: { inputTokens: number; outputTokens: number };
+  /**
+   * Provider-specific content the loop must carry but never interpret --
+   * currently Anthropic's extended-thinking blocks, which hold a signature
+   * required for multi-turn continuity and must be replayed verbatim, first,
+   * ahead of text/tool_use blocks, in the next request's assistant turn.
+   * Adapters that have nothing like this leave it undefined.
+   */
+  providerBlocks?: unknown[];
 }
 
 export interface DirectorClient {

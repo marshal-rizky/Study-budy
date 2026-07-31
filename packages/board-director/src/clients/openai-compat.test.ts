@@ -169,4 +169,54 @@ describe("OpenAICompatClient", () => {
     expect(threw).not.toBeInstanceOf(RetryableDirectorError);
     expect(threw).toBeInstanceOf(Error);
   });
+
+  it("rejects a response shape that doesn't match the schema with a clear, non-retryable error (I4)", async () => {
+    // `{"choices":[{}]}` -- a 200 OK with a body that has no `message` at all. Used to
+    // crash with an unguarded cast (`choice.message.tool_calls` on undefined); now it's
+    // caught by schema validation before any field is read.
+    const fetchImpl = vi.fn(async () => jsonResponse({ choices: [{}] }));
+    const client = new OpenAICompatClient({
+      apiKey: "k",
+      model: "m",
+      baseUrl: "https://example.com/v1",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    let threw: unknown;
+    try {
+      await client.createMessage(BASE_REQUEST);
+    } catch (err) {
+      threw = err;
+    }
+    expect(threw).toBeInstanceOf(Error);
+    expect(threw).not.toBeInstanceOf(RetryableDirectorError); // retrying won't fix a bad shape
+    expect((threw as Error).message).toMatch(/message/i);
+  });
+
+  it("rejects non-numeric usage fields instead of silently corrupting the cumulative token count (I4)", async () => {
+    // A provider sending usage as strings used to make `inputTokens += "123"` produce a
+    // string via JS coercion, which would silently defeat the maxTotalTokens comparison
+    // in director.ts (a string is never < a number the way the loop expects).
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({
+        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "hi" } }],
+        usage: { prompt_tokens: "123", completion_tokens: "45" },
+      })
+    );
+    const client = new OpenAICompatClient({
+      apiKey: "k",
+      model: "m",
+      baseUrl: "https://example.com/v1",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    let threw: unknown;
+    try {
+      await client.createMessage(BASE_REQUEST);
+    } catch (err) {
+      threw = err;
+    }
+    expect(threw).toBeInstanceOf(Error);
+    expect(threw).not.toBeInstanceOf(RetryableDirectorError);
+  });
 });

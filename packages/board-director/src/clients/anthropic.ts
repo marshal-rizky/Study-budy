@@ -17,16 +17,25 @@ export interface AnthropicMessagesLike {
 export interface AnthropicClientOptions {
   apiKey: string;
   model: string;
-  /** Enable Claude's extended thinking when there's token budget for it. Default true. */
+  /**
+   * Enable Claude's extended thinking. Uses the "adaptive" form (the model
+   * decides how much to think, steered by `output_config.effort`) rather
+   * than the deprecated fixed `budget_tokens` form, which current Claude 5
+   * models reject with HTTP 400. Default true.
+   */
   enableThinking?: boolean;
-  /** Token budget reserved for thinking; must be >=1024 and < maxTokens to take effect. Default 1024. */
-  thinkingBudgetTokens?: number;
+  /** Effort level passed via `output_config` when thinking is enabled. Default "high". */
+  thinkingEffort?: "low" | "medium" | "high" | "xhigh" | "max";
   /** Injectable underlying client -- for tests. Never call a real endpoint from a test. */
   client?: { messages: AnthropicMessagesLike };
 }
 
-const MIN_THINKING_BUDGET_TOKENS = 1024;
-const DEFAULT_THINKING_BUDGET_TOKENS = 1024;
+const DEFAULT_THINKING_EFFORT: NonNullable<AnthropicClientOptions["thinkingEffort"]> = "high";
+
+/** Builds the request's `thinking` param as a typed SDK value, so the compiler checks the wire shape. */
+function buildThinkingConfig(enableThinking: boolean): Anthropic.ThinkingConfigParam {
+  return enableThinking ? { type: "adaptive" } : { type: "disabled" };
+}
 
 function toAnthropicMessages(messages: DirectorMessage[]): Anthropic.MessageParam[] {
   const out: Anthropic.MessageParam[] = [];
@@ -36,6 +45,13 @@ function toAnthropicMessages(messages: DirectorMessage[]): Anthropic.MessagePara
       out.push({ role: "user", content: msg.content });
     } else if (msg.role === "assistant") {
       const blocks: Anthropic.ContentBlockParam[] = [];
+      // Thinking blocks (captured verbatim from the response that produced this turn)
+      // must come first and be replayed unchanged -- they carry a signature required
+      // for multi-turn continuity. The loop never inspects this field; it only carries
+      // it, so this is the one place that interprets it.
+      if (msg.providerBlocks) {
+        blocks.push(...(msg.providerBlocks as Anthropic.ContentBlockParam[]));
+      }
       if (msg.text) blocks.push({ type: "text", text: msg.text });
       for (const call of msg.toolCalls) {
         blocks.push({ type: "tool_use", id: call.id, name: call.name, input: call.input });
@@ -84,12 +100,10 @@ export class AnthropicClient implements DirectorClient {
     }));
 
     const enableThinking = this.opts.enableThinking ?? true;
-    const thinkingBudget = this.opts.thinkingBudgetTokens ?? DEFAULT_THINKING_BUDGET_TOKENS;
-    // Extended thinking needs budget_tokens >= 1024 and strictly < max_tokens. When the
-    // per-call token budget can't fit both, skip thinking instead of sending an invalid
-    // request -- the practical meaning of "when the model supports it" here.
-    const canThink =
-      enableThinking && thinkingBudget >= MIN_THINKING_BUDGET_TOKENS && req.maxTokens > thinkingBudget;
+    const thinking = buildThinkingConfig(enableThinking);
+    const outputConfig: Anthropic.OutputConfig | undefined = enableThinking
+      ? { effort: this.opts.thinkingEffort ?? DEFAULT_THINKING_EFFORT }
+      : undefined;
 
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: this.opts.model,
@@ -97,7 +111,8 @@ export class AnthropicClient implements DirectorClient {
       messages: toAnthropicMessages(req.messages),
       tools,
       max_tokens: req.maxTokens,
-      ...(canThink ? { thinking: { type: "enabled", budget_tokens: thinkingBudget } } : {}),
+      thinking,
+      ...(outputConfig ? { output_config: outputConfig } : {}),
     };
 
     let response: Anthropic.Message;
@@ -113,15 +128,19 @@ export class AnthropicClient implements DirectorClient {
     }
 
     const toolCalls: ToolCall[] = [];
+    const providerBlocks: unknown[] = [];
     let text = "";
     for (const block of response.content) {
       if (block.type === "text") {
         text += block.text;
       } else if (block.type === "tool_use") {
         toolCalls.push({ id: block.id, name: block.name, input: block.input });
+      } else if (block.type === "thinking" || block.type === "redacted_thinking") {
+        // Captured verbatim -- these carry a signature required for multi-turn
+        // continuity. The loop never inspects this; `toAnthropicMessages` replays it
+        // unchanged, first, the next time this turn is sent back as history.
+        providerBlocks.push(block);
       }
-      // thinking / redacted_thinking blocks are intentionally not surfaced --
-      // the director loop only ever sees the provider-neutral shape.
     }
 
     return {
@@ -131,6 +150,7 @@ export class AnthropicClient implements DirectorClient {
       usage: response.usage
         ? { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens }
         : undefined,
+      providerBlocks: providerBlocks.length > 0 ? providerBlocks : undefined,
     };
   }
 }

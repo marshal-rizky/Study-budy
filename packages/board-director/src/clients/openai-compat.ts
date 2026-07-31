@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { RetryableDirectorError } from "../client";
 import type { DirectorClient, DirectorMessage, DirectorRequest, DirectorResponse, ToolCall } from "../client";
 
@@ -25,16 +26,31 @@ interface OpenAIToolCall {
   function: { name: string; arguments: string };
 }
 
-interface OpenAIMessage {
-  role: string;
-  content?: string | null;
-  tool_calls?: OpenAIToolCall[];
-}
+// The response is untrusted wire data from whatever's behind TEACHER_BASE_URL -- free-tier
+// and self-hosted providers are exactly the ones most likely to send a near-miss shape.
+// `{"choices":[{}]}` used to crash with an unguarded cast; validating it here, once,
+// means every field read below is genuinely the type it claims to be -- in particular,
+// `usage` values must be numbers, so a provider sending `"123"` (a string) fails
+// validation loudly instead of silently turning `inputTokens += ...` into string
+// concatenation and disabling the maxTotalTokens comparison.
+const ResponseToolCallSchema = z.object({
+  id: z.string(),
+  type: z.literal("function"),
+  function: z.object({ name: z.string(), arguments: z.string() }),
+});
 
-interface OpenAIChatResponse {
-  choices: { message: OpenAIMessage; finish_reason: string }[];
-  usage?: { prompt_tokens: number; completion_tokens: number };
-}
+const ResponseMessageSchema = z.object({
+  role: z.string(),
+  content: z.string().nullable().optional(),
+  tool_calls: z.array(ResponseToolCallSchema).optional(),
+});
+
+const ChatCompletionResponseSchema = z.object({
+  choices: z
+    .array(z.object({ message: ResponseMessageSchema, finish_reason: z.string().optional() }))
+    .min(1),
+  usage: z.object({ prompt_tokens: z.number(), completion_tokens: z.number() }).optional(),
+});
 
 function mapFinishReason(reason: string | undefined): DirectorResponse["stopReason"] {
   switch (reason) {
@@ -127,7 +143,24 @@ export class OpenAICompatClient implements DirectorClient {
       throw new Error(`openai-compat: HTTP ${res.status} from chat/completions: ${bodyText}`);
     }
 
-    const json = (await res.json()) as OpenAIChatResponse;
+    let rawJson: unknown;
+    try {
+      rawJson = await res.json();
+    } catch (err) {
+      throw new Error(`openai-compat: response body was not valid JSON: ${String(err)}`);
+    }
+
+    const parsed = ChatCompletionResponseSchema.safeParse(rawJson);
+    if (!parsed.success) {
+      const issues = parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+        .join("; ");
+      // Not retryable: retrying an unexpected response shape won't fix it, and the
+      // caller (director.ts) treats any terminal error the same way -- stop and
+      // return the script accumulated so far.
+      throw new Error(`openai-compat: response did not match the expected shape: ${issues}`);
+    }
+    const json = parsed.data;
     const choice = json.choices[0];
     if (!choice) {
       throw new Error("openai-compat: response had no choices");

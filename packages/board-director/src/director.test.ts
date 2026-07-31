@@ -118,6 +118,34 @@ describe("solveProblem", () => {
     ]);
   });
 
+  it("ignores a model-supplied kind that conflicts with the tool called -- the tool's kind always wins (C3)", async () => {
+    const client = new FakeClient([
+      toolUse("1", "write_math", { tex: "2x+3=7", narration: "anchor" }),
+      // A write_math call whose input carries a conflicting kind:"text". If this were
+      // allowed to override, it would validate as a text step and skip the verifier
+      // entirely, letting unchecked (and here, wrong) algebra reach the board.
+      toolUse("2", "write_math", { kind: "text", tex: "2x=10", narration: "bad" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("solve 2x+3=7", client, { verify: true });
+
+    // Only the anchor made it in -- proving call "2" was validated as MATH (so the
+    // verifier ran on it at all) and then rejected for being wrong math, not silently
+    // accepted as an unverified text step.
+    expect(script.steps).toEqual([{ kind: "math", tex: "2x+3=7", narration: "anchor" }]);
+
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "2");
+
+    expect(errorResult).toBeDefined();
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("verification failed");
+  });
+
   it("uses the default scriptId when none is given", async () => {
     const client = new FakeClient([END_TURN]);
     const script = await solveProblem("q", client);
@@ -136,7 +164,11 @@ describe("solveProblem", () => {
     const script = await solveProblem("q", flakyThenOk);
     expect(script.steps).toEqual([]);
     expect(calls).toBe(3);
+  });
 
+  it("treats a terminal error (retries exhausted, or never retryable) as a stop signal, not an exception (I2)", async () => {
+    // Retries exhausted: still fails on every attempt within the single
+    // createMessageWithRetry call, which itself caps at 3 attempts.
     let neverOkCalls = 0;
     const alwaysFlaky: DirectorClient = {
       async createMessage(_req: DirectorRequest) {
@@ -144,9 +176,11 @@ describe("solveProblem", () => {
         throw new RetryableDirectorError("still transient");
       },
     };
-    await expect(solveProblem("q", alwaysFlaky)).rejects.toBeInstanceOf(RetryableDirectorError);
+    const script1 = await solveProblem("q", alwaysFlaky);
+    expect(script1.steps).toEqual([]); // no exception -- an empty partial script instead
     expect(neverOkCalls).toBe(3); // capped, not infinite
 
+    // Never retryable: createMessageWithRetry gives up on the first attempt.
     let nonRetryableCalls = 0;
     const hardFailure: DirectorClient = {
       async createMessage(_req: DirectorRequest) {
@@ -154,8 +188,33 @@ describe("solveProblem", () => {
         throw new Error("not retryable");
       },
     };
-    await expect(solveProblem("q", hardFailure)).rejects.toThrow("not retryable");
-    expect(nonRetryableCalls).toBe(1); // never retried
+    const script2 = await solveProblem("q", hardFailure);
+    expect(script2.steps).toEqual([]);
+    expect(nonRetryableCalls).toBe(1); // never retried, but still doesn't throw out of solveProblem
+  });
+
+  it("returns the partial script (and its usage) when a terminal error hits after some steps were already accepted (I2)", async () => {
+    let calls = 0;
+    const failsOnSecondTurn: DirectorClient = {
+      async createMessage(_req: DirectorRequest) {
+        calls++;
+        if (calls === 1) {
+          return toolUseWithUsage("1", "write_text", { text: "first", narration: "n" }, {
+            inputTokens: 10,
+            outputTokens: 4,
+          });
+        }
+        throw new Error("provider fell over on turn 2");
+      },
+    };
+
+    const result = await solveProblemDetailed("q", failsOnSecondTurn, { verify: false });
+
+    // The already-accepted step and its usage survive; the loop just stops rather than
+    // throwing away ten (here, one) verified steps because turn two failed.
+    expect(result.script.steps).toEqual([{ kind: "text", text: "first", narration: "n" }]);
+    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 4, toolCalls: 1 });
+    expect(calls).toBe(2);
   });
 
   it("stops once cumulative token usage reaches maxTotalTokens, returning the script built so far", async () => {
