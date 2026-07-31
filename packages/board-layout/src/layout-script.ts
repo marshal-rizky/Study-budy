@@ -12,6 +12,49 @@ export interface LayoutOptions {
   leading?: number;
 }
 
+/**
+ * Greedily word-wraps `text` so each line's measured width (via `layoutText`,
+ * i.e. real glyph metrics -- not a character count) fits within `usableWidth`
+ * px at the given font `size`. This is Bug 3: a model wrote a whole paragraph
+ * as one `write_text` step, which measured ~1667px wide against a 900px
+ * board and blew up the WHOLE derivation with a `LayoutOverflowError`
+ * downstream in `buildPlan` -- one over-long step should never discard an
+ * otherwise-correct multi-step derivation.
+ *
+ * Edge case: a single word wider than `usableWidth` on its own. We do not
+ * hard-break it mid-word (splitting a word makes the board harder to read,
+ * and hyphenation needs a dictionary this engine doesn't have) and we do not
+ * loop forever trying to shrink it to fit -- it is emitted as its own line
+ * and allowed to overflow. That line then either fits when `buildPlan`
+ * relocates it to a fresh page's margin, or throws `LayoutOverflowError` --
+ * the same behavior a single-word step already had before this fix, just
+ * scoped to one line instead of the whole step.
+ */
+function wrapTextToWidth(text: string, size: number, usableWidth: number): string[] {
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return [text];
+
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const candidate = current.length > 0 ? `${current} ${word}` : word;
+    const width = layoutText(candidate).width * size;
+    if (width <= usableWidth || current.length === 0) {
+      // Fits, or `current` is empty so `word` is the only thing that could
+      // start this line (the over-long-word edge case above) -- either way
+      // it belongs on the line being built.
+      current = candidate;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current.length > 0) lines.push(current);
+
+  return lines;
+}
+
 function toDiagram(spec: DiagramSpec): Diagram {
   switch (spec.kind) {
     case "axes":
@@ -41,15 +84,15 @@ function toDiagram(spec: DiagramSpec): Diagram {
  * vertical cursor by each step's own measured height (never a fixed line
  * height) so tall content never collides with what follows.
  *
- * `board` is accepted per the Phase 2 op contract for future width-aware
- * layout decisions; this implementation does not use it -- `buildPlan`
- * already measures ops against the board and paginates/throws on overflow.
+ * `board.width` is used to word-wrap `text` steps that would otherwise
+ * overflow (see `wrapTextToWidth`); `buildPlan` still measures every op
+ * against the board and paginates/throws on overflow independently of this.
  */
 export function layoutScript(script: BoardScript, board: Board, opts: LayoutOptions = {}): Op[] {
-  void board;
   const size = opts.size ?? 32;
   const margin = opts.margin ?? 40;
   const leading = opts.leading ?? 18;
+  const usableWidth = board.width - 2 * margin;
 
   const ops: Op[] = [];
   let cursor = margin;
@@ -71,10 +114,15 @@ export function layoutScript(script: BoardScript, board: Board, opts: LayoutOpti
       }
 
       case "text": {
-        const layout = layoutText(step.text);
-        const baseline = cursor + layout.ascent * size;
-        ops.push({ type: "write_text", text: step.text, at: { x: margin, y: baseline }, size });
-        cursor = baseline + layout.descent * size + leading;
+        const fullWidth = layoutText(step.text).width * size;
+        const lines =
+          fullWidth > usableWidth ? wrapTextToWidth(step.text, size, usableWidth) : [step.text];
+        for (const line of lines) {
+          const layout = layoutText(line);
+          const baseline = cursor + layout.ascent * size;
+          ops.push({ type: "write_text", text: line, at: { x: margin, y: baseline }, size });
+          cursor = baseline + layout.descent * size + leading;
+        }
         break;
       }
 

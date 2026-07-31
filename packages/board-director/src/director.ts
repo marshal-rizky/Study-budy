@@ -31,9 +31,39 @@ export interface DirectorUsage {
   toolCalls: number;
 }
 
+/**
+ * Why the loop stopped. `end_turn` is the clean case (model called no more
+ * tools). The two `max_*` reasons are the runaway guards firing on a model
+ * that never stops. `client_error` means a terminal client error broke the
+ * loop before it reached a natural stop -- this is the case a caller must
+ * not mistake for a clean run just because `script.steps` might still be
+ * empty (Bug 2: a total failure and a trivial clean run used to look
+ * identical).
+ */
+export type SolveStopReason = "end_turn" | "max_tool_calls" | "max_total_tokens" | "client_error";
+
+/** Longest an error message included in a `SolveResult` may be. Some client errors
+ * (e.g. openai-compat's HTTP-error path) embed the provider's raw response body,
+ * which can be long and must never reach a log or a caller in full -- truncating
+ * here, once, means no call site has to remember to. */
+const MAX_ERROR_MESSAGE_LEN = 200;
+
+function truncateErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.length > MAX_ERROR_MESSAGE_LEN
+    ? `${message.slice(0, MAX_ERROR_MESSAGE_LEN)}...`
+    : message;
+}
+
 export interface SolveResult {
   script: BoardScript;
   usage: DirectorUsage;
+  stopReason: SolveStopReason;
+  /** Present only when `stopReason` is `"client_error"`. Message is truncated
+   * (see `MAX_ERROR_MESSAGE_LEN`) and never includes an API key -- keys never
+   * flow into a `DirectorClient` error message in the first place (they live
+   * only in request headers), so there is nothing to strip, only to shorten. */
+  error?: { message: string };
 }
 
 const DEFAULT_MAX_TOOL_CALLS = 24;
@@ -171,6 +201,8 @@ export async function solveProblemDetailed(
   let toolCallCount = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let stopReason: SolveStopReason | null = null;
+  let error: { message: string } | undefined;
 
   while (toolCallCount < maxToolCalls && inputTokens + outputTokens < maxTotalTokens) {
     let response: DirectorResponse;
@@ -181,11 +213,16 @@ export async function solveProblemDetailed(
         tools: TOOLS,
         maxTokens,
       });
-    } catch {
+    } catch (err) {
       // Terminal client error -- retries (if any applied) are exhausted, or the
       // failure was never retryable to begin with. A partial, already-verified
       // script is worth more than an exception: stop here and return what we
-      // have, with the same "return what's accumulated" contract as the caps.
+      // have, with the same "return what's accumulated" contract as the caps --
+      // but unlike the caps, this is a failure, and `stopReason: "client_error"`
+      // says so instead of leaving a total failure looking identical to a run
+      // that just happened to produce zero steps.
+      stopReason = "client_error";
+      error = { message: truncateErrorMessage(err) };
       break;
     }
 
@@ -206,6 +243,7 @@ export async function solveProblemDetailed(
 
     if (response.toolCalls.length === 0) {
       // Nothing to execute and nothing to respond to -- the model is done.
+      stopReason = "end_turn";
       break;
     }
 
@@ -228,7 +266,10 @@ export async function solveProblemDetailed(
 
     messages.push({ role: "tool_results", results });
 
-    if (toolCallCount >= maxToolCalls) break;
+    if (toolCallCount >= maxToolCalls) {
+      stopReason = "max_tool_calls";
+      break;
+    }
     // No stopReason==="end_turn" check here: for a spec-compliant provider,
     // toolCalls is always empty exactly when stop_reason isn't tool-use (the
     // `toolCalls.length === 0` branch above already handles that case), so
@@ -243,8 +284,23 @@ export async function solveProblemDetailed(
     // removed rather than kept as dead-for-good, risky-for-bad code.
   }
 
+  // Every explicit `break` above sets `stopReason` before leaving the loop. The
+  // only way to fall through with it still null is the `while` condition itself
+  // going false -- i.e. a cap was already at/over its limit going into what
+  // would have been the next iteration, without a step-processing break firing
+  // in the iteration that crossed it (the `max_total_tokens` case: usage is
+  // only checked at the top of the loop, never mid-iteration).
+  if (stopReason === null) {
+    stopReason = toolCallCount >= maxToolCalls ? "max_tool_calls" : "max_total_tokens";
+  }
+
   const script = parseBoardScript({ scriptId, steps });
-  return { script, usage: { inputTokens, outputTokens, toolCalls: toolCallCount } };
+  return {
+    script,
+    usage: { inputTokens, outputTokens, toolCalls: toolCallCount },
+    stopReason,
+    ...(error ? { error } : {}),
+  };
 }
 
 /** Convenience wrapper over `solveProblemDetailed` for callers that only want the script. */

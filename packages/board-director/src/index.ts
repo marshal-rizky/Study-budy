@@ -10,7 +10,7 @@ export { RetryableDirectorError } from "./client";
 
 export { TOOLS, TOOL_TO_STEP_KIND } from "./tools";
 
-export type { SolveOptions, DirectorUsage, SolveResult } from "./director";
+export type { SolveOptions, DirectorUsage, SolveResult, SolveStopReason } from "./director";
 export { solveProblem, solveProblemDetailed } from "./director";
 
 export { AnthropicClient } from "./clients/anthropic";

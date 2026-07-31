@@ -19,6 +19,48 @@ import type { ToolDef } from "./client";
 
 type StepKind = "math" | "text" | "diagram" | "new_page";
 
+/**
+ * `zod-to-json-schema` emits the draft-07 tuple form for `z.tuple([...])`:
+ *   { type: "array", items: [schemaA, schemaB, ...], minItems, maxItems }
+ * Under JSON Schema draft 2020-12 -- which some providers (e.g. Groq) validate
+ * tool schemas against strictly -- `items` must be a single schema; positional
+ * tuples use `prefixItems` instead. An array-valued `items` is invalid there,
+ * so a strict provider rejects the whole tool definition with an HTTP 400
+ * before the model ever sees it (this is exactly Bug 1 in the smoke test).
+ *
+ * This walks the generated schema and rewrites every node where `items` is an
+ * array: if every element schema is identical (true for every tuple in this
+ * package's protocol -- `domain` and `yRange` are both `[number, number]`),
+ * collapse to the single-schema form, which still keeps the length exact via
+ * `minItems`/`maxItems`. If the elements differ, emit `prefixItems` (the
+ * 2020-12 way to say "position 0 is this, position 1 is that") alongside an
+ * `items` fallback using the first element, so drafts that only understand
+ * one form or the other both get a valid, type-preserving schema.
+ */
+function normalizeTupleItems(node: unknown): unknown {
+  if (Array.isArray(node)) {
+    return node.map(normalizeTupleItems);
+  }
+  if (node === null || typeof node !== "object") {
+    return node;
+  }
+  const walked: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    walked[key] = normalizeTupleItems(value);
+  }
+  if (Array.isArray(walked.items) && walked.items.length > 0) {
+    const items = walked.items;
+    const allIdentical = items.every((item) => JSON.stringify(item) === JSON.stringify(items[0]));
+    if (allIdentical) {
+      walked.items = items[0];
+    } else {
+      walked.prefixItems = items;
+      walked.items = items[0];
+    }
+  }
+  return walked;
+}
+
 function jsonSchemaFor(kind: StepKind): object {
   // BoardStepSchema.options is a union of four distinct ZodObject types (one per
   // discriminant), so TS can't give `.find` a single precise return type. Widen to a
@@ -36,7 +78,7 @@ function jsonSchemaFor(kind: StepKind): object {
     unknown
   >;
   delete schema.$schema;
-  return schema;
+  return normalizeTupleItems(schema) as object;
 }
 
 const WRITE_MATH_DESCRIPTION = `Write one mathematical expression or equation as a step on the board.
@@ -55,7 +97,12 @@ go through write_math, never write_text.`;
 
 const WRITE_TEXT_DESCRIPTION = `Write plain narrative or explanatory text as a step on the board (e.g.
 "Now we factor the quadratic."). This is rendered literally as text -- it is NOT parsed as TeX or math
-notation. Never put an equation, formula, or math symbol here; use write_math for anything mathematical.`;
+notation. Never put an equation, formula, or math symbol here; use write_math for anything mathematical.
+
+Board text is for SHORT labels and connecting phrases only -- roughly 60 characters or fewer, like a
+teacher would actually fit on a physical board. Do not write paragraphs, do not explain your reasoning at
+length, and do not restate the whole problem on the board. Long explanation belongs in \`narration\`
+instead -- it is spoken aloud to the student, not written, so there is no length pressure there.`;
 
 const DRAW_DIAGRAM_DESCRIPTION = `Draw a diagram step: coordinate axes, a plotted curve, an arrow, or a
 benzene ring. A curve's \`expr\` is a plain expression string in x (e.g. "x^2", "sin(x)*2") evaluated by a

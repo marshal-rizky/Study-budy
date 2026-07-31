@@ -253,6 +253,68 @@ describe("solveProblem", () => {
     expect(client.requests).toHaveLength(2);
   });
 
+  it("reports stopReason 'end_turn' for a normal run (Bug 2)", async () => {
+    const client = new FakeClient([
+      toolUse("1", "write_math", { tex: "x=1", narration: "first" }),
+      END_TURN,
+    ]);
+
+    const result = await solveProblemDetailed("q", client, { verify: false });
+
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.error).toBeUndefined();
+  });
+
+  it("reports stopReason 'max_tool_calls' when the call-count cap fires", async () => {
+    const client = new FakeClient([toolUse("x", "write_text", { text: "again", narration: "n" })]);
+
+    const result = await solveProblemDetailed("never stop", client, { maxToolCalls: 5, verify: false });
+
+    expect(result.stopReason).toBe("max_tool_calls");
+    expect(result.error).toBeUndefined();
+  });
+
+  it("reports stopReason 'max_total_tokens' when the cumulative token cap fires", async () => {
+    const client = new FakeClient([
+      toolUseWithUsage("1", "write_math", { tex: "x=1", narration: "first" }, {
+        inputTokens: 60,
+        outputTokens: 20,
+      }),
+      toolUseWithUsage("2", "write_text", { text: "second", narration: "n" }, {
+        inputTokens: 30,
+        outputTokens: 10,
+      }),
+      toolUse("3", "write_text", { text: "third, should never be requested", narration: "n" }),
+    ]);
+
+    const result = await solveProblemDetailed("q", client, { maxTotalTokens: 100, verify: false });
+
+    expect(result.stopReason).toBe("max_total_tokens");
+    expect(result.error).toBeUndefined();
+  });
+
+  it("reports stopReason 'client_error' with a present, key-free message when a terminal client error breaks the loop (Bug 2)", async () => {
+    const secretKey = "sk-super-secret-do-not-leak";
+    const hardFailure: DirectorClient = {
+      async createMessage(_req: DirectorRequest) {
+        // A realistic client error embeds provider response text, never the key itself
+        // (the key only ever lives in a request header, which this loop never touches) --
+        // but it can be long, so it must come back truncated regardless.
+        throw new Error(
+          `openai-compat: HTTP 400 from chat/completions: ${"x".repeat(300)} (auth used ${secretKey.slice(0, 0)})`
+        );
+      },
+    };
+
+    const result = await solveProblemDetailed("q", hardFailure, { verify: false });
+
+    expect(result.stopReason).toBe("client_error");
+    expect(result.error?.message).toBeDefined();
+    expect(result.error!.message.length).toBeLessThanOrEqual(203); // ~200 + "..."
+    expect(result.error!.message).not.toContain(secretKey);
+    expect(result.script.steps).toEqual([]);
+  });
+
   it("solveProblemDetailed reports usage totals matching the sum of the fake's reported usage", async () => {
     const client = new FakeClient([
       toolUseWithUsage("1", "write_text", { text: "step", narration: "n" }, {
