@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { checkRenderable } from "@teacher/board-layout";
+import { verifyStep } from "@teacher/verifier";
 import type { DirectorClient, DirectorRequest, DirectorResponse } from "./client";
 import { RetryableDirectorError } from "./client";
 import { FakeClient } from "./clients/fake";
@@ -18,6 +20,21 @@ function toolUseWithUsage(
 }
 
 const END_TURN: DirectorResponse = { toolCalls: [], text: "Done.", stopReason: "end_turn" };
+
+/**
+ * Finds the tool_result envelope for call `id` across the whole recorded
+ * request history -- it lands in whichever request came after the call was
+ * executed, so a flat search across every request's messages is the only
+ * reliable way to find it. Centralized so a change to the message/envelope
+ * shape is one edit instead of one per call site.
+ */
+function toolResultFor(client: FakeClient, id: string) {
+  return client.requests
+    .flatMap((r) => r.messages)
+    .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+    .flatMap((m) => m.results)
+    .find((r) => r.id === id);
+}
 
 describe("solveProblem", () => {
   it("produces an ordered script from a two-tool-call conversation", async () => {
@@ -92,11 +109,7 @@ describe("solveProblem", () => {
 
     // Find, across the whole recorded history, the tool_results entry for call "2" (the
     // rejected step) -- it lands in whichever request came after it was executed.
-    const errorResult = client.requests
-      .flatMap((r) => r.messages)
-      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
-      .flatMap((m) => m.results)
-      .find((r) => r.id === "2");
+    const errorResult = toolResultFor(client, "2");
 
     expect(errorResult).toBeDefined();
     expect(errorResult?.isError).toBe(true);
@@ -135,11 +148,7 @@ describe("solveProblem", () => {
     // accepted as an unverified text step.
     expect(script.steps).toEqual([{ kind: "math", tex: "2x+3=7", narration: "anchor" }]);
 
-    const errorResult = client.requests
-      .flatMap((r) => r.messages)
-      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
-      .flatMap((m) => m.results)
-      .find((r) => r.id === "2");
+    const errorResult = toolResultFor(client, "2");
 
     expect(errorResult).toBeDefined();
     expect(errorResult?.isError).toBe(true);
@@ -327,15 +336,17 @@ describe("solveProblem", () => {
     // The unrenderable step never made it into the script; only the correction did.
     expect(script.steps).toEqual([{ kind: "math", tex: "x = \\frac{1}{2}", narration: "corrected" }]);
 
-    const errorResult = client.requests
-      .flatMap((r) => r.messages)
-      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
-      .flatMap((m) => m.results)
-      .find((r) => r.id === "1");
+    const errorResult = toolResultFor(client, "1");
 
     expect(errorResult).toBeDefined();
     expect(errorResult?.isError).toBe(true);
-    expect(errorResult?.content).toContain("\\boxed");
+    // Assert on the engine's actual diagnostic, not just that the static part of the
+    // error template mentions "\boxed" -- the template's trailing sentence names
+    // \boxed unconditionally regardless of what the engine actually reported, so
+    // `toContain("\\boxed")` alone would pass even if `renderable.reason` were wrong
+    // or empty. "unknown command \boxed" only appears if the engine's own message
+    // made it into `content`.
+    expect(errorResult?.content).toContain("unknown command \\boxed");
   });
 
   it("renderability is checked even when verify is off and even for the unverifiable anchor step", async () => {
@@ -354,14 +365,61 @@ describe("solveProblem", () => {
 
     expect(script.steps).toEqual([{ kind: "math", tex: "x = 1", narration: "corrected" }]);
 
-    const errorResult = client.requests
-      .flatMap((r) => r.messages)
-      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
-      .flatMap((m) => m.results)
-      .find((r) => r.id === "1");
+    const errorResult = toolResultFor(client, "1");
 
     expect(errorResult?.isError).toBe(true);
-    expect(errorResult?.content).toContain("\\boxed");
+    // Same discrimination as above: the engine's own diagnostic, not the static
+    // template text.
+    expect(errorResult?.content).toContain("unknown command \\boxed");
+  });
+
+  it("checks renderability BEFORE verification even when the same step would also fail verification, proving order rather than just presence (Bug 4)", async () => {
+    // \cdot is a case where the two parsers disagree: the stroke engine's parseMath
+    // does not know it (rejected -- see stroke-engine's SYMBOL_COMMANDS), but the
+    // verifier's texToExpr does (it maps \cdot -> "*", see tex-to-expr.ts's
+    // OPERATOR_COMMANDS) and can therefore evaluate this step's arithmetic. That
+    // means this exact tex is BOTH unrenderable AND would fail arithmetic
+    // verification if verifyStep ran on it. If renderability were checked after
+    // verifyStep (or removed and rendered moot by verify alone), the tool_result
+    // would read "verification failed"; because it's checked first, it must read
+    // the engine's parse diagnostic instead. A test using verify:false (as the two
+    // tests above do) cannot distinguish these -- it only proves verify-independence,
+    // not ordering.
+    //
+    // Both preconditions this test depends on are asserted directly, right here,
+    // rather than assumed. The handoff doc lists \cdot as a likely near-term
+    // addition to the engine's TeX subset -- if that happens, the first assertion
+    // below fails with a message that says exactly why, instead of the ordering
+    // assertions failing deep in the FakeClient plumbing with no explanation, and
+    // instead of the tempting (wrong) fix of switching to verify:false, which would
+    // silently delete the only coverage of the ordering guarantee.
+    const renderablePrecondition = checkRenderable("2 \\cdot x=10");
+    expect(
+      renderablePrecondition.ok,
+      "precondition for this test: \\cdot must still be unrenderable by the engine. If this fails, the engine's TeX subset grew \\cdot -- rewrite this test with a different disagreement case between parseMath and texToExpr; do not switch to verify:false."
+    ).toBe(false);
+
+    const verifyVerdict = verifyStep("2x+3=7", "2 \\cdot x=10");
+    expect(
+      verifyVerdict.status,
+      "precondition for this test: this tex must still fail arithmetic verification (not just render). Only status matters here -- the verifier's wording is not this test's concern."
+    ).toBe("failed");
+
+    const client = new FakeClient([
+      toolUse("1", "write_math", { tex: "2x+3=7", narration: "anchor" }),
+      toolUse("2", "write_math", { tex: "2 \\cdot x=10", narration: "wrong and unrenderable" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("solve 2x+3=7", client, { verify: true });
+
+    expect(script.steps).toEqual([{ kind: "math", tex: "2x+3=7", narration: "anchor" }]);
+
+    const errorResult = toolResultFor(client, "2");
+
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("unknown command \\cdot");
+    expect(errorResult?.content).not.toContain("verification failed");
   });
 
   it("solveProblemDetailed reports usage totals matching the sum of the fake's reported usage", async () => {

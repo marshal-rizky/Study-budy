@@ -3,7 +3,7 @@ import { MathParseError, parseMath } from "@teacher/stroke-engine";
 export type RenderableResult = { ok: true } | { ok: false; reason: string };
 
 /**
- * Pre-flight check for whether the stroke engine can actually draw `tex`,
+ * Pre-flight check for whether the engine's TeX parser accepts `tex`,
  * without throwing. `parseMath` is the exact call `layoutScript` makes at
  * layout time -- if it throws `MathParseError` there, the whole script is
  * discarded downstream (Bug 4: a model emitted `\boxed{...}` and `\quad`,

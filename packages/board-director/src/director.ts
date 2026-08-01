@@ -143,7 +143,7 @@ function handleToolCall(call: ToolCall, verify: boolean, anchorTex: string | nul
     const renderable = checkRenderable(step.tex);
     if (!renderable.ok) {
       return {
-        content: `cannot render "${step.tex}": ${renderable.reason}. Re-emit this step using only the supported TeX subset -- no \\boxed, \\quad, or other commands outside it.`,
+        content: `cannot render "${step.tex}": ${renderable.reason}. Re-emit this step using only the TeX subset listed in the write_math tool description.`,
         isError: true,
       };
     }
