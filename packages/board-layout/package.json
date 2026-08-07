@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./fixtures": "./src/__fixtures__/model-output-corpus.ts"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest"

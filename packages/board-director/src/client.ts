@@ -55,8 +55,19 @@ export interface DirectorClient {
  * errors of this type.
  */
 export class RetryableDirectorError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
+  /**
+   * How long the server said to wait before retrying, in ms -- parsed from
+   * an HTTP 429's `Retry-After` header (seconds or HTTP-date form) by the
+   * adapter that raised this error. When present, the director's retry loop
+   * honours it instead of computing its own backoff, since the server knows
+   * its own rate-limit window better than a generic exponential guess.
+   * Undefined when the provider didn't send one, or for non-429 failures.
+   */
+  readonly retryAfterMs?: number;
+
+  constructor(message: string, options?: { cause?: unknown; retryAfterMs?: number }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "RetryableDirectorError";
+    this.retryAfterMs = options?.retryAfterMs;
   }
 }

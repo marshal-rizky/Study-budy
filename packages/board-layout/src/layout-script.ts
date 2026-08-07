@@ -1,7 +1,16 @@
-import type { BoardScript, DiagramSpec } from "@teacher/protocol";
-import { layoutMath, layoutText, parseMath } from "@teacher/stroke-engine";
+import type { BoardScript, BoardStep, DiagramSpec } from "@teacher/protocol";
+import {
+  buildPlan,
+  DEFAULT_MARGIN,
+  LayoutOverflowError,
+  layoutMath,
+  layoutText,
+  MathParseError,
+  parseMath,
+  SYMBOL_COMMANDS,
+} from "@teacher/stroke-engine";
 import type { Board, Diagram, Op } from "@teacher/stroke-engine";
-import { compileExpr } from "./expr";
+import { compileExpr, ExprError } from "./expr";
 
 export interface LayoutOptions {
   /** Font size in px for math/text ops. Default 32. */
@@ -154,4 +163,84 @@ export function layoutScript(script: BoardScript, board: Board, opts: LayoutOpti
   }
 
   return ops;
+}
+
+export type RenderCheck = { ok: true } | { ok: false; reason: string };
+
+/** Built from the parser's own supported-symbol table so this can never drift
+ * from what `parseMath` actually accepts (see math/parser.ts SYMBOL_COMMANDS). */
+const SUPPORTED_TEX_COMMANDS = ["\\frac", "\\sqrt", "^", "_", ...Object.keys(SYMBOL_COMMANDS).map((c) => `\\${c}`)].join(
+  " "
+);
+
+/**
+ * Turns a throw from the real render path into an actionable, model-readable
+ * reason string -- naming the offending construct rather than just echoing a
+ * raw stack-trace-flavored message.
+ */
+function describeRenderError(err: unknown, board: Board): string {
+  if (err instanceof MathParseError) {
+    const unknownCommand = /^unknown command (\\\S+)/.exec(err.message);
+    if (unknownCommand) {
+      return `unsupported TeX command ${unknownCommand[1]} — supported: ${SUPPORTED_TEX_COMMANDS}`;
+    }
+    return `invalid TeX: ${err.message}`;
+  }
+
+  if (err instanceof ExprError) {
+    return `invalid curve expression: ${err.message}`;
+  }
+
+  if (err instanceof LayoutOverflowError) {
+    const margin = board.margin ?? DEFAULT_MARGIN;
+    const usableWidth = board.width - 2 * margin;
+    const usableHeight = board.height - 2 * margin;
+    if (err.required.width > usableWidth) {
+      return `too wide for the board (${err.required.width}px of ${usableWidth}px usable) — split into shorter steps`;
+    }
+    if (err.required.height > usableHeight) {
+      return `too tall for the board (${err.required.height}px of ${usableHeight}px usable) — split into shorter steps`;
+    }
+    return `does not fit the board (${err.required.width}x${err.required.height}px on a ${board.width}x${board.height}px board) — split into shorter steps`;
+  }
+
+  const message = err instanceof Error ? err.message : String(err);
+  return `render failed: ${message}`;
+}
+
+/**
+ * The three error types that mean "the model produced content this board
+ * cannot draw". Anything else escaping the render path is a defect in our
+ * own code, not bad model output.
+ */
+function isModelOutputError(err: unknown): boolean {
+  return (
+    err instanceof MathParseError ||
+    err instanceof ExprError ||
+    err instanceof LayoutOverflowError
+  );
+}
+
+/**
+ * Attempts the real render path -- `layoutScript` on a one-step script, then
+ * `buildPlan` -- for a single step, converting a *model-output* failure into a
+ * verdict instead of letting it propagate. This is the gate that lets
+ * `board-director` reject unrenderable model output as a normal tool error
+ * (self-correctable) instead of the whole pipeline crashing on it.
+ *
+ * Deliberately NOT a blanket catch. Only `MathParseError`, `ExprError` and
+ * `LayoutOverflowError` become `ok: false`; any other exception is a bug in
+ * the engine or in this package and is rethrown. Swallowing those would
+ * disguise our own defects as "the model wrote bad TeX" -- silent, and
+ * precisely the failure mode this gate exists to end.
+ */
+export function checkStepRenderable(step: BoardStep, board: Board): RenderCheck {
+  try {
+    const ops = layoutScript({ scriptId: "__renderability-check__", steps: [step] }, board);
+    buildPlan(ops, { board });
+    return { ok: true };
+  } catch (err) {
+    if (!isModelOutputError(err)) throw err;
+    return { ok: false, reason: describeRenderError(err, board) };
+  }
 }

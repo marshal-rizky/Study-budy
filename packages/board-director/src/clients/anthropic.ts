@@ -89,7 +89,11 @@ export class AnthropicClient implements DirectorClient {
   private readonly sdk: { messages: AnthropicMessagesLike };
 
   constructor(private readonly opts: AnthropicClientOptions) {
-    this.sdk = opts.client ?? new Anthropic({ apiKey: opts.apiKey });
+    // maxRetries: 0 -- board-director's own retry loop (director.ts) already retries
+    // RetryableDirectorError with backoff; leaving the SDK's default retries on would
+    // compound the two, turning one logical retry attempt into several real requests
+    // and making the outer loop's attempt count and backoff timing meaningless.
+    this.sdk = opts.client ?? new Anthropic({ apiKey: opts.apiKey, maxRetries: 0 });
   }
 
   async createMessage(req: DirectorRequest): Promise<DirectorResponse> {

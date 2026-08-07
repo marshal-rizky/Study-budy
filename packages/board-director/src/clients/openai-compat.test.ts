@@ -4,10 +4,10 @@ import type { DirectorRequest } from "../client";
 import { RetryableDirectorError } from "../client";
 import { OpenAICompatClient } from "./openai-compat";
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
   });
 }
 
@@ -154,6 +154,7 @@ describe("OpenAICompatClient", () => {
     await expect(client.createMessage(BASE_REQUEST)).rejects.toBeInstanceOf(RetryableDirectorError);
 
     const badRequest = vi.fn(async () => jsonResponse({ error: "bad request" }, 400));
+
     const client2 = new OpenAICompatClient({
       apiKey: "k",
       model: "m",
@@ -168,6 +169,76 @@ describe("OpenAICompatClient", () => {
     }
     expect(threw).not.toBeInstanceOf(RetryableDirectorError);
     expect(threw).toBeInstanceOf(Error);
+  });
+
+  it("surfaces a 429's Retry-After header (seconds form) as retryAfterMs on the thrown error (Fix 2)", async () => {
+    const rateLimited = vi.fn(async () =>
+      jsonResponse({ error: "rate limited" }, 429, { "retry-after": "12" })
+    );
+    const client = new OpenAICompatClient({
+      apiKey: "k",
+      model: "m",
+      baseUrl: "https://example.com/v1",
+      fetchImpl: rateLimited as unknown as typeof fetch,
+    });
+
+    let threw: unknown;
+    try {
+      await client.createMessage(BASE_REQUEST);
+    } catch (err) {
+      threw = err;
+    }
+
+    expect(threw).toBeInstanceOf(RetryableDirectorError);
+    expect((threw as RetryableDirectorError).retryAfterMs).toBe(12_000);
+  });
+
+  it("surfaces a 429's Retry-After header (HTTP-date form) as retryAfterMs on the thrown error (Fix 2)", async () => {
+    const future = new Date(Date.now() + 30_000);
+    const rateLimited = vi.fn(async () =>
+      jsonResponse({ error: "rate limited" }, 429, { "retry-after": future.toUTCString() })
+    );
+    const client = new OpenAICompatClient({
+      apiKey: "k",
+      model: "m",
+      baseUrl: "https://example.com/v1",
+      fetchImpl: rateLimited as unknown as typeof fetch,
+    });
+
+    let threw: unknown;
+    try {
+      await client.createMessage(BASE_REQUEST);
+    } catch (err) {
+      threw = err;
+    }
+
+    expect(threw).toBeInstanceOf(RetryableDirectorError);
+    const retryAfterMs = (threw as RetryableDirectorError).retryAfterMs;
+    expect(retryAfterMs).toBeDefined();
+    // Allow slack for wall-clock time elapsed between building `future` and the client
+    // computing `dateMs - Date.now()`.
+    expect(retryAfterMs!).toBeGreaterThan(25_000);
+    expect(retryAfterMs!).toBeLessThanOrEqual(30_000);
+  });
+
+  it("leaves retryAfterMs undefined when a 429 has no Retry-After header", async () => {
+    const rateLimited = vi.fn(async () => jsonResponse({ error: "rate limited" }, 429));
+    const client = new OpenAICompatClient({
+      apiKey: "k",
+      model: "m",
+      baseUrl: "https://example.com/v1",
+      fetchImpl: rateLimited as unknown as typeof fetch,
+    });
+
+    let threw: unknown;
+    try {
+      await client.createMessage(BASE_REQUEST);
+    } catch (err) {
+      threw = err;
+    }
+
+    expect(threw).toBeInstanceOf(RetryableDirectorError);
+    expect((threw as RetryableDirectorError).retryAfterMs).toBeUndefined();
   });
 
   it("rejects a response shape that doesn't match the schema with a clear, non-retryable error (I4)", async () => {

@@ -1,4 +1,5 @@
-import { checkRenderable } from "@teacher/board-layout";
+import { checkStepRenderable } from "@teacher/board-layout";
+import type { Board } from "@teacher/board-layout";
 import { BoardStepSchema, parseBoardScript } from "@teacher/protocol";
 import type { BoardScript, BoardStep } from "@teacher/protocol";
 import { verifyStep } from "@teacher/verifier";
@@ -23,6 +24,19 @@ export interface SolveOptions {
   verify?: boolean;
   /** Deterministic id for the resulting script (design Flow C's stale-script guard). */
   scriptId?: string;
+  /**
+   * Target board dimensions the renderability gate checks each step against
+   * before accepting it (Fix 1 -- see `checkStepRenderable`). Must match
+   * whatever board the script will actually be laid out and rendered on;
+   * a mismatch would pass steps that don't actually fit. Default 900x520.
+   */
+  board?: Board;
+  /**
+   * Injectable sleep used for retry backoff delays -- tests supply a no-op
+   * so a run with several retries doesn't actually wait out real time.
+   * Defaults to a real `setTimeout`-based sleep.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Token/call totals for one `solveProblem` run, for callers that want to log spend. */
@@ -71,9 +85,33 @@ const DEFAULT_MAX_TOOL_CALLS = 24;
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_MAX_TOTAL_TOKENS = 60000;
 const DEFAULT_SCRIPT_ID = "script-1";
+/** Matches the board size used elsewhere in the pipeline (layout-script.test.ts, harvest.mjs). */
+const DEFAULT_BOARD: Board = { width: 900, height: 520 };
 
 const MAX_REQUEST_ATTEMPTS = 3;
-const RETRY_BASE_DELAY_MS = 50;
+// Free-tier providers (Groq et al.) rate-limit hard enough that a 50ms/100ms backoff is
+// indistinguishable from no backoff at all -- live evidence: 5 rapid Groq requests all hit
+// the rate limit and the old retry never helped (Fix 2). 1000ms is the base a real limiter
+// window can clear; RETRY_MAX_DELAY_MS caps how far exponential growth or a provider's
+// Retry-After can push a single wait.
+const RETRY_BASE_DELAY_MS = 1000;
+const RETRY_MAX_DELAY_MS = 30_000;
+
+function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Exponential backoff with full jitter (delay uniformly random in
+ * `[0, min(cap, base * 2^(attempt-1))]`) -- used only when the provider
+ * didn't tell us how long to wait via `Retry-After`. Jitter avoids every
+ * retrying caller waking up at the same instant and re-triggering the same
+ * rate limit together.
+ */
+function exponentialBackoffMs(attempt: number): number {
+  const cap = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+  return Math.random() * cap;
+}
 
 const SYSTEM_PROMPT = `You are a maths, physics, and chemistry teacher solving a problem on a shared \
 whiteboard while a student watches.
@@ -100,21 +138,30 @@ interface ToolOutcome {
 
 /**
  * Validates one tool call against the protocol's zod schema (re-attaching
- * the `kind` the tool name implies), then, for `write_math`, checks that the
- * stroke engine can actually render the TeX before running the verifier
+ * the `kind` the tool name implies), runs it through the renderability gate
+ * (Fix 1 -- `checkStepRenderable`), and for `write_math`, runs the verifier
  * against the derivation's anchor equation. Never throws -- failures come
  * back as a `ToolOutcome` with `isError: true` so the caller can report them
  * to the model as a `tool_result` instead of crashing the loop or silently
  * accepting a bad step.
  *
- * Renderability is checked before arithmetic verification and regardless of
- * `verify`: if the engine can't even parse the TeX, that's the most
- * actionable error to hand back, and there's no point verifying arithmetic
- * in a string that will never reach the board (Bug 4 -- `parseMath` threw on
- * `\boxed`/`\quad` at layout time, downstream of this loop entirely, and
- * discarded an otherwise-correct 9-step derivation).
+ * The renderability gate runs the REAL render path (layoutScript + buildPlan)
+ * for this one step before it can enter the script -- this is what stops
+ * unsupported TeX (`\boxed`, `\quad`, ...), a bad curve expression, or
+ * oversized content from reaching `parseBoardScript`/`layoutScript` later and
+ * throwing an uncaught `MathParseError` / `ExprError` / `LayoutOverflowError`
+ * that would otherwise discard the whole script (see the handoff note's
+ * Bug 4 and the live harvest evidence). It runs unconditionally (not gated
+ * behind `verify`, and for every step kind, not just `write_math`) and
+ * before arithmetic verification: there's no point checking whether a step
+ * that can never reach the board is mathematically correct.
  */
-function handleToolCall(call: ToolCall, verify: boolean, anchorTex: string | null): ToolOutcome {
+function handleToolCall(
+  call: ToolCall,
+  verify: boolean,
+  anchorTex: string | null,
+  board: Board
+): ToolOutcome {
   const kind = TOOL_TO_STEP_KIND[call.name];
   if (!kind) {
     return { content: `unknown tool "${call.name}"`, isError: true };
@@ -139,51 +186,56 @@ function handleToolCall(call: ToolCall, verify: boolean, anchorTex: string | nul
 
   const step = parsed.data;
 
-  if (step.kind === "math") {
-    const renderable = checkRenderable(step.tex);
-    if (!renderable.ok) {
+  const renderCheck = checkStepRenderable(step, board);
+  if (!renderCheck.ok) {
+    return {
+      content: `cannot render "${call.name}" step: ${renderCheck.reason}. Re-derive this step so it fits the supported subset -- do not write it as-is.`,
+      isError: true,
+    };
+  }
+
+  if (verify && step.kind === "math") {
+    const verdict = verifyStep(anchorTex, step.tex);
+    if (verdict.status === "failed") {
       return {
-        content: `cannot render "${step.tex}": ${renderable.reason}. Re-emit this step using only the TeX subset listed in the write_math tool description.`,
+        content: `verification failed for "${step.tex}": ${verdict.reason}. Re-derive this step -- do not write it as-is.`,
         isError: true,
       };
-    }
-
-    if (verify) {
-      const verdict = verifyStep(anchorTex, step.tex);
-      if (verdict.status === "failed") {
-        return {
-          content: `verification failed for "${step.tex}": ${verdict.reason}. Re-derive this step -- do not write it as-is.`,
-          isError: true,
-        };
-      }
     }
   }
 
   return { content: "ok", isError: false, step };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * Calls the client, retrying a `RetryableDirectorError` (rate limit,
- * connection reset, 5xx -- whatever the adapter judged transient) with
- * exponential backoff, capped at `MAX_REQUEST_ATTEMPTS` total tries.
- * Anything else -- including validation failures, which never throw from
- * a client -- propagates on the first attempt.
+ * connection reset, 5xx -- whatever the adapter judged transient) up to
+ * `MAX_REQUEST_ATTEMPTS` total tries. Anything else -- including validation
+ * failures, which never throw from a client -- propagates on the first
+ * attempt.
+ *
+ * Delay between attempts (Fix 2): honours the provider's `Retry-After` (via
+ * `err.retryAfterMs`, capped at `RETRY_MAX_DELAY_MS`) when present -- the
+ * server knows its own rate-limit window better than a guess. Otherwise
+ * falls back to jittered exponential backoff from `RETRY_BASE_DELAY_MS`.
+ * `sleepFn` is injectable so tests exercise multiple retries without
+ * actually waiting out real time.
  */
 async function createMessageWithRetry(
   client: DirectorClient,
-  req: DirectorRequest
+  req: DirectorRequest,
+  sleepFn: (ms: number) => Promise<void>
 ): Promise<DirectorResponse> {
   for (let attempt = 1; attempt <= MAX_REQUEST_ATTEMPTS; attempt++) {
     try {
       return await client.createMessage(req);
     } catch (err) {
-      const retryable = err instanceof RetryableDirectorError;
-      if (!retryable || attempt >= MAX_REQUEST_ATTEMPTS) throw err;
-      await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+      if (!(err instanceof RetryableDirectorError) || attempt >= MAX_REQUEST_ATTEMPTS) throw err;
+      const delay =
+        err.retryAfterMs !== undefined
+          ? Math.min(err.retryAfterMs, RETRY_MAX_DELAY_MS)
+          : exponentialBackoffMs(attempt);
+      await sleepFn(delay);
     }
   }
   // Unreachable: the loop above always either returns or throws.
@@ -213,6 +265,8 @@ export async function solveProblemDetailed(
   const maxTotalTokens = opts.maxTotalTokens ?? DEFAULT_MAX_TOTAL_TOKENS;
   const verify = opts.verify ?? true;
   const scriptId = opts.scriptId ?? DEFAULT_SCRIPT_ID;
+  const board = opts.board ?? DEFAULT_BOARD;
+  const sleepFn = opts.sleep ?? realSleep;
 
   const messages: DirectorMessage[] = [{ role: "user", content: question }];
   const steps: BoardStep[] = [];
@@ -226,12 +280,16 @@ export async function solveProblemDetailed(
   while (toolCallCount < maxToolCalls && inputTokens + outputTokens < maxTotalTokens) {
     let response: DirectorResponse;
     try {
-      response = await createMessageWithRetry(client, {
-        system: SYSTEM_PROMPT,
-        messages,
-        tools: TOOLS,
-        maxTokens,
-      });
+      response = await createMessageWithRetry(
+        client,
+        {
+          system: SYSTEM_PROMPT,
+          messages,
+          tools: TOOLS,
+          maxTokens,
+        },
+        sleepFn
+      );
     } catch (err) {
       // Terminal client error -- retries (if any applied) are exhausted, or the
       // failure was never retryable to begin with. A partial, already-verified
@@ -270,7 +328,7 @@ export async function solveProblemDetailed(
 
     for (const call of response.toolCalls) {
       toolCallCount++;
-      const outcome = handleToolCall(call, verify, anchorTex);
+      const outcome = handleToolCall(call, verify, anchorTex, board);
       results.push({ id: call.id, content: outcome.content, isError: outcome.isError });
 
       if (!outcome.isError && outcome.step) {

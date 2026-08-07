@@ -52,7 +52,9 @@ export class LayoutOverflowError extends Error {
 const PEN_SPEED_PX_PER_MS = 0.45;
 const MIN_STROKE_MS = 60;
 const MAX_STROKE_MS = 2000;
-const DEFAULT_MARGIN = 24;
+/** Exported so callers (e.g. board-layout's renderability gate) can compute
+ * usable board area the same way `buildPlan` does, without duplicating the value. */
+export const DEFAULT_MARGIN = 24;
 export const STROKE_GAP_MS = 60;
 /** Pause holding the finished page before it is wiped for the next one. */
 export const PAGE_BREAK_MS = 700;

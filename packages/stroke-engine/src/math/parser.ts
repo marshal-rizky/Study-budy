@@ -13,7 +13,9 @@ export class MathParseError extends Error {
   }
 }
 
-const SYMBOL_COMMANDS: Record<string, string> = {
+/** Exported so callers (e.g. board-layout's renderability gate) can build an
+ * accurate "supported commands" message without hand-duplicating this list. */
+export const SYMBOL_COMMANDS: Record<string, string> = {
   pi: "π", theta: "θ", Delta: "Δ", int: "∫", sum: "Σ",
   times: "×", div: "÷", pm: "±", to: "→", ne: "≠",
   le: "≤", ge: "≥", approx: "≈", rightleftharpoons: "⇌",

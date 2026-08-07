@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkRenderable } from "@teacher/board-layout";
+import { checkStepRenderable } from "@teacher/board-layout";
 import { verifyStep } from "@teacher/verifier";
 import type { DirectorClient, DirectorRequest, DirectorResponse } from "./client";
 import { RetryableDirectorError } from "./client";
@@ -116,6 +116,101 @@ describe("solveProblem", () => {
     expect(errorResult?.content).toContain("verification failed");
   });
 
+  it("rejects a write_math step with unsupported TeX (the renderability gate, Fix 1) and lets the model self-correct", async () => {
+    const client = new FakeClient([
+      // \boxed is outside the stroke engine's TeX subset -- from the handoff note's Bug 4
+      // ("Add a regression test with \\boxed{x}").
+      toolUse("1", "write_math", { tex: "\\boxed{x}", narration: "bad" }),
+      toolUse("2", "write_math", { tex: "x = \\frac{1}{2}", narration: "corrected" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("solve", client, { verify: false });
+
+    // Only the corrected step made it in -- the unrenderable one never entered the script.
+    expect(script.steps).toEqual([{ kind: "math", tex: "x = \\frac{1}{2}", narration: "corrected" }]);
+
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "1");
+
+    expect(errorResult).toBeDefined();
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("cannot render");
+    // Actionable: names the offending command, not just "invalid".
+    expect(errorResult?.content).toContain("\\boxed");
+  });
+
+  it("rejects the real OpenRouter output combining \\/ , \\boxed and \\quad in one step (handoff Bug 4)", async () => {
+    const client = new FakeClient([
+      toolUse("1", "write_math", { tex: "x = \\frac{2}{4} \\/\\boxed{\\frac{1}{2}}, \\quad", narration: "bad" }),
+      toolUse("2", "write_math", { tex: "x = \\frac{1}{2}", narration: "corrected" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("solve", client, { verify: false });
+
+    expect(script.steps).toEqual([{ kind: "math", tex: "x = \\frac{1}{2}", narration: "corrected" }]);
+
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "1");
+
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("cannot render");
+  });
+
+  it("rejects a write_math step too wide for the configured board, without crashing solveProblem (Fix 1)", async () => {
+    // The exact 959px-wide chained equation from the live harvest that used to throw
+    // LayoutOverflowError straight out of buildPlan and discard the whole script.
+    const client = new FakeClient([
+      toolUse("1", "write_math", {
+        tex: "(x^2 - 9)/(x - 3) = (x + 3)(x - 3)/(x - 3) = x + 3",
+        narration: "chained",
+      }),
+      toolUse("2", "write_math", { tex: "x + 3", narration: "simplified" }),
+      END_TURN,
+    ]);
+
+    const script = await solveProblem("simplify", client, {
+      verify: false,
+      board: { width: 900, height: 520 },
+    });
+
+    expect(script.steps).toEqual([{ kind: "math", tex: "x + 3", narration: "simplified" }]);
+
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "1");
+
+    expect(errorResult?.isError).toBe(true);
+    expect(errorResult?.content).toContain("cannot render");
+    expect(errorResult?.content).toMatch(/wide|split/);
+  });
+
+  it("honours a custom board option -- a step that fits 900x520 can be rejected on a smaller board", async () => {
+    const client = new FakeClient([toolUse("1", "write_math", { tex: "x = 1", narration: "n" }), END_TURN]);
+
+    const script = await solveProblem("solve", client, {
+      verify: false,
+      board: { width: 10, height: 10 }, // nothing can fit
+    });
+
+    expect(script.steps).toEqual([]);
+    const errorResult = client.requests
+      .flatMap((r) => r.messages)
+      .filter((m): m is Extract<typeof m, { role: "tool_results" }> => m.role === "tool_results")
+      .flatMap((m) => m.results)
+      .find((r) => r.id === "1");
+    expect(errorResult?.isError).toBe(true);
+  });
+
   it("accepts the same wrong step when verify is false", async () => {
     const client = new FakeClient([
       toolUse("1", "write_math", { tex: "2x+3=7", narration: "anchor" }),
@@ -170,9 +265,77 @@ describe("solveProblem", () => {
         return END_TURN;
       },
     };
-    const script = await solveProblem("q", flakyThenOk);
+    // Fast sleep -- Fix 2 raised the real backoff base to 1000ms, so tests that hit several
+    // retries must inject a no-op sleep or every run of the suite pays real wall-clock time.
+    const script = await solveProblem("q", flakyThenOk, { sleep: async () => {} });
     expect(script.steps).toEqual([]);
     expect(calls).toBe(3);
+  });
+
+  it("honours a RetryableDirectorError's retryAfterMs instead of computing its own backoff (Fix 2)", async () => {
+    let calls = 0;
+    const client: DirectorClient = {
+      async createMessage(_req: DirectorRequest) {
+        calls++;
+        if (calls === 1) throw new RetryableDirectorError("rate limited", { retryAfterMs: 5000 });
+        return END_TURN;
+      },
+    };
+    const delays: number[] = [];
+    await solveProblem("q", client, {
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    expect(delays).toEqual([5000]);
+    expect(calls).toBe(2);
+  });
+
+  it("caps an honoured retryAfterMs at the maximum backoff delay rather than waiting arbitrarily long (Fix 2)", async () => {
+    let calls = 0;
+    const client: DirectorClient = {
+      async createMessage(_req: DirectorRequest) {
+        calls++;
+        if (calls === 1) throw new RetryableDirectorError("rate limited", { retryAfterMs: 120_000 });
+        return END_TURN;
+      },
+    };
+    const delays: number[] = [];
+    await solveProblem("q", client, {
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    expect(delays).toHaveLength(1);
+    expect(delays[0]).toBeLessThanOrEqual(30_000);
+  });
+
+  it("falls back to jittered exponential backoff from a >=1000ms base when the client gives no retryAfterMs (Fix 2)", async () => {
+    let calls = 0;
+    const client: DirectorClient = {
+      async createMessage(_req: DirectorRequest) {
+        calls++;
+        if (calls < 3) throw new RetryableDirectorError("transient"); // no retryAfterMs
+        return END_TURN;
+      },
+    };
+    const delays: number[] = [];
+    await solveProblem("q", client, {
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    });
+
+    // Two retries (attempts 1 and 2) before the third call succeeds. Full-jitter backoff:
+    // attempt N's delay is uniform in [0, min(30000, 1000 * 2^(N-1))] -- unlike the old
+    // 50ms base, this is large enough to actually clear a real free-tier rate-limit window.
+    expect(delays).toHaveLength(2);
+    expect(delays[0]).toBeGreaterThanOrEqual(0);
+    expect(delays[0]).toBeLessThanOrEqual(1000);
+    expect(delays[1]).toBeGreaterThanOrEqual(0);
+    expect(delays[1]).toBeLessThanOrEqual(2000);
   });
 
   it("treats a terminal error (retries exhausted, or never retryable) as a stop signal, not an exception (I2)", async () => {
@@ -185,7 +348,7 @@ describe("solveProblem", () => {
         throw new RetryableDirectorError("still transient");
       },
     };
-    const script1 = await solveProblem("q", alwaysFlaky);
+    const script1 = await solveProblem("q", alwaysFlaky, { sleep: async () => {} });
     expect(script1.steps).toEqual([]); // no exception -- an empty partial script instead
     expect(neverOkCalls).toBe(3); // capped, not infinite
 
@@ -340,13 +503,11 @@ describe("solveProblem", () => {
 
     expect(errorResult).toBeDefined();
     expect(errorResult?.isError).toBe(true);
-    // Assert on the engine's actual diagnostic, not just that the static part of the
-    // error template mentions "\boxed" -- the template's trailing sentence names
-    // \boxed unconditionally regardless of what the engine actually reported, so
-    // `toContain("\\boxed")` alone would pass even if `renderable.reason` were wrong
-    // or empty. "unknown command \boxed" only appears if the engine's own message
-    // made it into `content`.
-    expect(errorResult?.content).toContain("unknown command \\boxed");
+    // Assert on the engine's actual diagnostic (surfaced through checkStepRenderable's
+    // reason), not just that the static part of the error template mentions "\boxed" --
+    // the template's trailing sentence doesn't name any command itself, so this only
+    // passes if the gate's own reason made it into `content`.
+    expect(errorResult?.content).toContain("\\boxed");
   });
 
   it("renderability is checked even when verify is off and even for the unverifiable anchor step", async () => {
@@ -368,9 +529,9 @@ describe("solveProblem", () => {
     const errorResult = toolResultFor(client, "1");
 
     expect(errorResult?.isError).toBe(true);
-    // Same discrimination as above: the engine's own diagnostic, not the static
+    // Same discrimination as above: the gate's own diagnostic, not the static
     // template text.
-    expect(errorResult?.content).toContain("unknown command \\boxed");
+    expect(errorResult?.content).toContain("\\boxed");
   });
 
   it("checks renderability BEFORE verification even when the same step would also fail verification, proving order rather than just presence (Bug 4)", async () => {
@@ -393,7 +554,10 @@ describe("solveProblem", () => {
     // assertions failing deep in the FakeClient plumbing with no explanation, and
     // instead of the tempting (wrong) fix of switching to verify:false, which would
     // silently delete the only coverage of the ordering guarantee.
-    const renderablePrecondition = checkRenderable("2 \\cdot x=10");
+    const renderablePrecondition = checkStepRenderable(
+      { kind: "math", tex: "2 \\cdot x=10", narration: "precondition check" },
+      { width: 900, height: 520 }
+    );
     expect(
       renderablePrecondition.ok,
       "precondition for this test: \\cdot must still be unrenderable by the engine. If this fails, the engine's TeX subset grew \\cdot -- rewrite this test with a different disagreement case between parseMath and texToExpr; do not switch to verify:false."
@@ -418,7 +582,7 @@ describe("solveProblem", () => {
     const errorResult = toolResultFor(client, "2");
 
     expect(errorResult?.isError).toBe(true);
-    expect(errorResult?.content).toContain("unknown command \\cdot");
+    expect(errorResult?.content).toContain("\\cdot");
     expect(errorResult?.content).not.toContain("verification failed");
   });
 

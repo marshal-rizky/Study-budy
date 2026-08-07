@@ -3,7 +3,7 @@ export * from "./types";
 export * from "./rng";
 export { getGlyph, registerGlyph, FALLBACK_GLYPH } from "./glyphs/library";
 export { jitterStroke, resample } from "./jitter";
-export { parseMath, MathParseError } from "./math/parser";
+export { parseMath, MathParseError, SYMBOL_COMMANDS } from "./math/parser";
 export type { MathNode } from "./math/parser";
 export { layoutMath, layoutText } from "./math/layout";
 export type { MathLayout, GlyphPlacement, LineSeg } from "./math/layout";
@@ -16,6 +16,7 @@ export {
   LayoutOverflowError,
   STROKE_GAP_MS,
   PAGE_BREAK_MS,
+  DEFAULT_MARGIN,
 } from "./planner";
 export type { Op, DrawOp, Board, PenStroke, RenderPlan } from "./planner";
 export { renderFrame, Player } from "./render";

@@ -1,5 +1,4 @@
-export { layoutScript } from "./layout-script";
-export type { LayoutOptions } from "./layout-script";
+export { layoutScript, checkStepRenderable } from "./layout-script";
+export type { LayoutOptions, RenderCheck } from "./layout-script";
 export { compileExpr, ExprError } from "./expr";
-export { checkRenderable } from "./renderable";
-export type { RenderableResult } from "./renderable";
+export type { Board } from "@teacher/stroke-engine";
