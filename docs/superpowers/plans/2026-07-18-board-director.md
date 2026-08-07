@@ -50,7 +50,17 @@ out rather than assumed away.
 
 - TypeScript strict everywhere; npm workspaces; Vitest.
 - `packages/protocol` has one runtime dependency (`zod`) and no engine import.
-- The director package never imports the stroke engine; it speaks protocol only.
+- ~~The director package never imports the stroke engine; it speaks protocol only.~~
+  **Amended 2026-08-07.** The director now depends on `@teacher/board-layout`,
+  which depends on `@teacher/stroke-engine`. Reason: live runs showed 17% of
+  real model steps aborting the whole derivation with `MathParseError` /
+  `LayoutOverflowError`, and the only sound way to know a step is renderable is
+  to *attempt the real render*. A reimplemented approximation would drift from
+  the engine and reintroduce the bug it was meant to prevent.
+  The original intent — **the director never computes coordinates** — is
+  unchanged and still holds: it calls a boolean gate, never a layout function,
+  and positions are still assigned solely by `board-layout`. Dependency
+  direction stays acyclic: `board-director → board-layout → stroke-engine`.
 - No secrets in the repo. Key comes from the environment.
 - Every task ends green: `npm test` at the root, `tsc --noEmit` in each package.
 
