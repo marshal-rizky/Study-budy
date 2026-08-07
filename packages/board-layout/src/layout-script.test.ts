@@ -136,6 +136,26 @@ describe("layoutScript", () => {
     }
   });
 
+  it("keeps every wrapped line's width within both margins of the board (mutation survivor: dropping the margin from usableWidth)", () => {
+    const longText = "word ".repeat(80).trim(); // far too wide to fit unwrapped on a 900px board
+    const script: BoardScript = {
+      scriptId: "wrap",
+      steps: [{ kind: "text", text: longText, narration: "n" }],
+    };
+
+    const ops = layoutScript(script, board);
+    const textOps = ops.filter(
+      (o): o is Extract<Op, { type: "write_text" }> => o.type === "write_text"
+    );
+    expect(textOps.length).toBeGreaterThan(1); // actually wrapped into multiple lines
+
+    const margin = 24; // DEFAULT_MARGIN -- `board` here carries no explicit margin
+    for (const op of textOps) {
+      const lineWidth = layoutText(op.text).width * op.size;
+      expect(margin + lineWidth + margin).toBeLessThanOrEqual(board.width);
+    }
+  });
+
   it("integration: a realistic 9-step quadratic solution stays within the board through buildPlan", () => {
     const script: BoardScript = {
       scriptId: "quadratic",

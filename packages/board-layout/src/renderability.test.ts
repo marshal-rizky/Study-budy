@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BoardStep } from "@teacher/protocol";
-import { buildPlan, mulberry32 } from "@teacher/stroke-engine";
+import { buildPlan, layoutText, mulberry32 } from "@teacher/stroke-engine";
 import type { Board } from "@teacher/stroke-engine";
 import { checkStepRenderable, layoutScript } from "./layout-script";
 import { MODEL_OUTPUT_CORPUS } from "./__fixtures__/model-output-corpus";
@@ -50,6 +50,114 @@ describe("checkStepRenderable -- bad curve expressions (the third named bug clas
     };
 
     expect(checkStepRenderable(step, board)).toEqual({ ok: true });
+  });
+});
+
+describe("checkStepRenderable -- nesting depth guard (Finding 1)", () => {
+  it("rejects deeply nested braces with ok:false instead of throwing a RangeError", () => {
+    const tex = "{".repeat(5000) + "x";
+    expect(() => checkStepRenderable(mathStep(tex), board)).not.toThrow();
+    const verdict = checkStepRenderable(mathStep(tex), board);
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.reason).toContain("nests");
+  });
+
+  it("rejects a deeply nested \\frac chain with ok:false instead of throwing a RangeError", () => {
+    const tex = "\\frac{".repeat(4000) + "x" + "}{y}".repeat(4000);
+    expect(() => checkStepRenderable(mathStep(tex), board)).not.toThrow();
+    const verdict = checkStepRenderable(mathStep(tex), board);
+    expect(verdict.ok).toBe(false);
+  });
+
+  it("rejects a chain of brace-less \\sqrt with ok:false (no braces to count, only the command chain)", () => {
+    const tex = "\\sqrt".repeat(4000) + "2";
+    expect(() => checkStepRenderable(mathStep(tex), board)).not.toThrow();
+    const verdict = checkStepRenderable(mathStep(tex), board);
+    expect(verdict.ok).toBe(false);
+  });
+
+  it("rejects a curve expr with deeply nested parens with ok:false instead of throwing", () => {
+    const step: BoardStep = {
+      kind: "diagram",
+      narration: "deep",
+      diagram: {
+        kind: "curve",
+        expr: "(".repeat(5000) + "x" + ")".repeat(5000),
+        domain: [-1, 1],
+        width: 200,
+        height: 150,
+        yRange: [-2, 2],
+      },
+    };
+    expect(() => checkStepRenderable(step, board)).not.toThrow();
+    const verdict = checkStepRenderable(step, board);
+    expect(verdict.ok).toBe(false);
+  });
+
+  it("still accepts realistic nesting well under the limit", () => {
+    expect(checkStepRenderable(mathStep("\\frac{\\frac{a}{b}}{c}"), board)).toEqual({ ok: true });
+  });
+});
+
+describe("checkStepRenderable -- honours board.margin (Finding 3)", () => {
+  it("agrees with a margin-aware caller instead of always laying out at a hardcoded 40px margin", () => {
+    const size = 32;
+    // Grow a single unbroken word until it's wide enough to overflow a 900px board at
+    // margin 250 (usable width 400) but comfortably fit at margin 40 (usable width
+    // 820) -- exactly the asymmetry a hardcoded-40 gate would miss.
+    let word = "x";
+    while (layoutText(word).width * size < 700) word += "x";
+    const width = layoutText(word).width * size;
+    expect(width).toBeLessThan(860); // fits with room to spare at margin 40
+    expect(width).toBeGreaterThan(650); // wide enough to overflow at margin 250
+
+    const board250: Board = { width: 900, height: 520, margin: 250 };
+    const step: BoardStep = { kind: "text", text: word, narration: "n" };
+
+    const verdict = checkStepRenderable(step, board250);
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.reason).toMatch(/wide|split|fit/);
+
+    // Independently confirms the gate isn't guessing: a margin-aware caller running
+    // the real render path on this exact step and board also overflows.
+    expect(() => {
+      const ops = layoutScript({ scriptId: "s", steps: [step] }, board250, { margin: board250.margin });
+      buildPlan(ops, { board: board250 });
+    }).toThrow();
+  });
+});
+
+describe("checkStepRenderable -- degenerate diagrams produce no ink (Finding 4)", () => {
+  it("rejects a curve whose domain/yRange are too extreme for any sample to be finite", () => {
+    const step: BoardStep = {
+      kind: "diagram",
+      narration: "n",
+      diagram: {
+        kind: "curve",
+        expr: "x^2",
+        domain: [-1e308, 1e308],
+        width: 300,
+        height: 200,
+        yRange: [-1e308, 1e308],
+      },
+    };
+
+    const verdict = checkStepRenderable(step, board);
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.reason).toContain("no drawable points");
+  });
+
+  it("still accepts a well-scaled curve that produces real ink", () => {
+    const step: BoardStep = {
+      kind: "diagram",
+      narration: "n",
+      diagram: { kind: "curve", expr: "x^2", domain: [-2, 2], width: 200, height: 150, yRange: [0, 4] },
+    };
+    expect(checkStepRenderable(step, board)).toEqual({ ok: true });
+  });
+
+  it("does not reject a new_page step for producing zero strokes -- that's legitimately empty", () => {
+    expect(checkStepRenderable({ kind: "new_page" }, board)).toEqual({ ok: true });
   });
 });
 

@@ -338,7 +338,7 @@ describe("solveProblem", () => {
     expect(delays[1]).toBeLessThanOrEqual(2000);
   });
 
-  it("treats a terminal error (retries exhausted, or never retryable) as a stop signal, not an exception (I2)", async () => {
+  it("treats a terminal error (retries exhausted, or never retryable) as a stop signal, not an exception, at the solveProblemDetailed level (I2)", async () => {
     // Retries exhausted: still fails on every attempt within the single
     // createMessageWithRetry call, which itself caps at 3 attempts.
     let neverOkCalls = 0;
@@ -348,8 +348,9 @@ describe("solveProblem", () => {
         throw new RetryableDirectorError("still transient");
       },
     };
-    const script1 = await solveProblem("q", alwaysFlaky, { sleep: async () => {} });
-    expect(script1.steps).toEqual([]); // no exception -- an empty partial script instead
+    const result1 = await solveProblemDetailed("q", alwaysFlaky, { sleep: async () => {} });
+    expect(result1.stopReason).toBe("client_error");
+    expect(result1.script.steps).toEqual([]); // no exception -- an empty partial script instead
     expect(neverOkCalls).toBe(3); // capped, not infinite
 
     // Never retryable: createMessageWithRetry gives up on the first attempt.
@@ -360,9 +361,40 @@ describe("solveProblem", () => {
         throw new Error("not retryable");
       },
     };
-    const script2 = await solveProblem("q", hardFailure);
-    expect(script2.steps).toEqual([]);
-    expect(nonRetryableCalls).toBe(1); // never retried, but still doesn't throw out of solveProblem
+    const result2 = await solveProblemDetailed("q", hardFailure);
+    expect(result2.stopReason).toBe("client_error");
+    expect(result2.script.steps).toEqual([]);
+    expect(nonRetryableCalls).toBe(1); // never retried, but still doesn't throw out of solveProblemDetailed
+  });
+
+  it("solveProblem (unlike solveProblemDetailed) throws when the run stops on a client error (Fix 5)", async () => {
+    // This is the exact gap the handoff note flagged: solveProblem used to discard
+    // stopReason entirely, so a hard client_error and a clean trivial run both came back
+    // as an empty script -- indistinguishable. solveProblem must now surface the failure
+    // instead of returning a script that looks identical to a successful empty run.
+    const alwaysFlaky: DirectorClient = {
+      async createMessage(_req: DirectorRequest) {
+        throw new RetryableDirectorError("still transient");
+      },
+    };
+    await expect(solveProblem("q", alwaysFlaky, { sleep: async () => {} })).rejects.toThrow(
+      /client error/
+    );
+
+    const hardFailure: DirectorClient = {
+      async createMessage(_req: DirectorRequest) {
+        throw new Error("not retryable");
+      },
+    };
+    await expect(solveProblem("q", hardFailure)).rejects.toThrow(/client error/);
+  });
+
+  it("solveProblem still returns the partial script without throwing when a run stops on a cap, not a client error (Fix 5)", async () => {
+    const client = new FakeClient([toolUse("x", "write_text", { text: "again", narration: "n" })]);
+
+    const script = await solveProblem("never stop", client, { maxToolCalls: 3, verify: false });
+
+    expect(script.steps).toHaveLength(3);
   });
 
   it("returns the partial script (and its usage) when a terminal error hits after some steps were already accepted (I2)", async () => {

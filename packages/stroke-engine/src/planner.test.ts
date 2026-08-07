@@ -47,6 +47,30 @@ describe("buildPlan", () => {
     expect(plan.strokes).toHaveLength(0);
     expect(plan.totalMs).toBe(0);
   });
+
+  it("filters a single-point stroke too, not just an empty one (mutation survivor: `< 2` weakened to `< 1`)", () => {
+    // fn is finite at exactly one sampled x (the domain midpoint, i=0 of 48) and NaN
+    // everywhere else, so `diagramStrokes` pushes exactly one point into the curve's
+    // single stroke -- a stroke of length 1, distinct from the length-0 case the test
+    // above already covers. `s.length < 2` must drop it; a weakened `s.length < 1`
+    // would let it through.
+    const plan = buildPlan(
+      [{
+        type: "draw_diagram",
+        diagram: {
+          kind: "curve",
+          fn: (x) => (x === 0 ? 5 : NaN),
+          domain: [0, 1],
+          width: 100,
+          height: 100,
+          yRange: [0, 10],
+        },
+        at: { x: 0, y: 0 },
+      }],
+      { seed: 42 }
+    );
+    expect(plan.strokes).toHaveLength(0);
+  });
   it("throws MathParseError for bad TeX (caller handles per spec §6)", () => {
     expect(() =>
       buildPlan([{ type: "write_math", tex: "\\bogus", at: { x: 0, y: 0 }, size: 40 }])

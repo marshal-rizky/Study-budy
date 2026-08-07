@@ -380,12 +380,32 @@ export async function solveProblemDetailed(
   };
 }
 
-/** Convenience wrapper over `solveProblemDetailed` for callers that only want the script. */
+/**
+ * Convenience wrapper over `solveProblemDetailed` for callers that only want
+ * the script.
+ *
+ * Throws when `stopReason` is `"client_error"` -- a hard infrastructure
+ * failure (the client never reached a natural stop) is not model output, so
+ * swallowing it here and returning whatever partial script happened to
+ * accumulate would make a total failure indistinguishable from a clean
+ * trivial run, exactly the bug `stopReason` exists to prevent (see
+ * `SolveStopReason`'s doc comment). Callers who need the partial script even
+ * on a client error, or who want to distinguish it from the cap-related stop
+ * reasons, should call `solveProblemDetailed` directly -- it never throws for
+ * any stop reason. Cap-related stops (`max_tool_calls`, `max_total_tokens`)
+ * and the clean `end_turn` case all still return normally here, script and
+ * all, exactly as before.
+ */
 export async function solveProblem(
   question: string,
   client: DirectorClient,
   opts: SolveOptions = {}
 ): Promise<BoardScript> {
-  const { script } = await solveProblemDetailed(question, client, opts);
-  return script;
+  const result = await solveProblemDetailed(question, client, opts);
+  if (result.stopReason === "client_error") {
+    throw new Error(
+      `solveProblem: run stopped on a client error: ${result.error?.message ?? "unknown error"}`
+    );
+  }
+  return result.script;
 }
